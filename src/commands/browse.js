@@ -33,6 +33,7 @@ export async function runBrowse(
     signals = process,
     pid = process.pid, // names this run's registry entry and profile
     fill: fillOverride, // --fill (true) / --no-fill (false); undefined: from the config
+    viewer = runViewer, // injectable for tests
   } = {},
 ) {
   // The viewer would refuse a terminal it can't draw in anyway; refuse before downloading or
@@ -94,7 +95,7 @@ export async function runBrowse(
     ).catch((err) => stderr.write(`termbrowse: could not record Chrome in the registry: ${err.message}\n`));
     if (interrupted) return 130;
     announce(cfg, chrome, headless); // fire and forget: the viewer must not wait on a hook (runHook never rejects)
-    return await runViewer({
+    return await viewer({
       port: chrome.port,
       stdin,
       stdout,

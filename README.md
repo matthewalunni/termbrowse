@@ -4,7 +4,7 @@ termbrowse draws a live Chrome tab inside your terminal with the Kitty graphics 
 
 <!-- TODO: add a recording of the viewer in a pane (docs/demo.gif) and show it here. -->
 
-The viewer only shows the page. You can't click or type into it, so the page is driven by the agent (or by whatever else talks to its debugging port).
+The viewer is interactive: click, scroll, type and paste into the page from the terminal (see [Using the page](#using-the-page)). On an agent's browser, the first thing you do takes control from the agent until you hand it back.
 
 ## Install
 
@@ -29,7 +29,7 @@ termbrowse example.com
 termbrowse localhost:3000        # localhost and 127.0.0.1 get http://
 ```
 
-This starts a Chrome for Testing of its own and draws the page in the terminal. In a terminal that can't draw Kitty graphics it says so and exits 2 before starting any Chrome. Press `q` or Ctrl-C to quit, which closes that Chrome. The last row is a status line with the URL and frames per second, `idle` when no frame came in the last second (Chrome only sends frames when the page changes), or `paused` (the pane is too small) or `disconnected` (Chrome went away). When a new tab opens (a popup, or a page an agent opens with `new_page`), the viewer switches to it, and when that tab closes it goes back to the tab it was showing before.
+This starts a Chrome for Testing of its own and draws the page in the terminal. In a terminal that can't draw Kitty graphics it says so and exits 2 before starting any Chrome. Press `q` or Ctrl-C to quit, which closes that Chrome (until you first click, type, scroll or paste: after that those keys go to the page, and you quit with the prefix key and `q`, see [Using the page](#using-the-page)). The last row is a status line with the URL and frames per second, `idle` when no frame came in the last second (Chrome only sends frames when the page changes), or `paused` (the pane is too small) or `disconnected` (Chrome went away). When a new tab opens (a popup, or a page an agent opens with `new_page`), the viewer switches to it, and when that tab closes it goes back to the tab it was showing before.
 
 Each run uses a fresh copy of the starter profile (see `termbrowse login`), and that copy is deleted when you quit. Signing in during a `termbrowse <url>` session lasts only for that session. You can run several at once.
 
@@ -43,7 +43,7 @@ termbrowse view --agent t2p --tab docs  # the tab whose URL or title contains "d
 
 `--tab` picks the first tab whose URL or title contains the text, ignoring case. If no tab matches, the viewer shows the first tab.
 
-Quitting the viewer leaves that Chrome running. If the agent has no browser yet, `view --agent` says so and exits 1. An agent's Chrome only starts on its first browser action.
+Quitting the viewer leaves that Chrome running. On an agent's browser, your first click, key press, paste or scroll takes control from the agent (see [Taking over from an agent](#taking-over-from-an-agent)). If the agent has no browser yet, `view --agent` says so and exits 1. An agent's Chrome only starts on its first browser action.
 
 ### 3. `termbrowse mcp`: one Chrome per agent
 
@@ -98,7 +98,7 @@ The plugin provides:
 
 - an MCP server named `chrome-devtools` that runs `termbrowse mcp`, so each agent gets its own Chrome for Testing. Its tools are called `mcp__plugin_termbrowse_chrome-devtools__<tool>`.
 - the skills from Google's chrome-devtools-mcp plugin (`chrome-devtools`, `a11y-debugging`, `cookie-debugging`, `debug-optimize-lcp`, `memory-leak-debugging`, `troubleshooting`), copied unchanged from version 1.11.0. Its `chrome-devtools-cli` skill is left out because it drives Google's separate `chrome-devtools` CLI, not termbrowse.
-- `watch-browser`, a skill that has the agent tell you the `termbrowse view --agent <id>` command for its browser and, in Herdr, offer to open it in a pane beside its own.
+- `watch-browser`, a skill that has the agent tell you the `termbrowse view --agent <id>` command for its browser and, in Herdr, offer to open it in a pane beside its own. It also has the agent ask you to take over when it is stuck on a login, 2FA or CAPTCHA, and carry on once you hand the browser back.
 
 If you have Google's `chrome-devtools-mcp` plugin installed, disable it (`claude plugin disable chrome-devtools-mcp@claude-plugins-official`). Otherwise each agent gets two browser servers with the same tools: Google's, which drives a Chrome of its own that termbrowse can't show, and termbrowse's. You could switch off just its server in `/mcp`, but its skills would still load next to the copies in this plugin, so disabling the whole plugin is simpler.
 
@@ -153,6 +153,15 @@ on_launch = ""              # shell command run after a termbrowse Chrome starts
 [view]
 fill_pane = true             # pages opened with `termbrowse <url>` (and `view --port` on such a browser) fill the pane
 fill_pane_for_agents = false # agent browsers fill the pane too (`view --agent`, `view --port` on an agent's port)
+
+[keys]                       # reserved keys of the viewer, see "Using the page"
+prefix = "ctrl-]"
+give_back = "g"
+quit = "q"
+
+[control]                    # taking over an agent's browser, durations like "90s", "5m", "2h"
+idle_return = "5m"           # hand the browser back after this long without input
+max_wait = "10m"             # the longest an agent's tool call waits while you hold control
 ```
 
 On macOS, agent windows and `termbrowse <url>` windows open in the background, so they don't steal focus from your terminal (or pull a window manager that follows focus onto their workspace). Set `background = false` to have them come to the front as they open. `termbrowse login` always comes to the front, since you type into it.
@@ -178,6 +187,46 @@ Other environment variables:
 | `XDG_STATE_HOME` | state: registry, profiles, logs (default `~/.local/state/termbrowse`) |
 | `XDG_CACHE_HOME` | Chrome for Testing downloads (default `~/.cache/termbrowse`) |
 
+## Using the page
+
+The viewer forwards what you do in the pane to the page, in any terminal that draws Kitty graphics (below). Only the image area counts: the status row and any empty margin around the image do nothing.
+
+- **Mouse**: click (left, middle, right), double and triple click, drag and scroll wheel all reach the page. Moving the pointer alone never takes control of an agent's browser; hover is forwarded to the page while you hold control (on a browser started by `termbrowse <url>`, always).
+- **Keys**: letters, digits, punctuation, Enter, Tab, Backspace, Escape, arrows, Home, End, PageUp, PageDown, Insert, Delete and F1 to F12, with Ctrl, Alt and Shift. Terminals without the Kitty keyboard protocol work for plain typing, Enter, Backspace and arrows; modified keys are more reliable in Kitty, Ghostty and Herdr. Accented letters, emoji and other non-ASCII text are inserted as text.
+- **Paste**: bracketed paste goes into the focused field in one piece.
+
+Before your first input, `q` and Ctrl-C quit the viewer, as before. After it they go to the page (so you can type a `q` into a search box), and the viewer is left with the reserved keys, or with a signal (SIGINT, SIGTERM, SIGHUP, e.g. closing the pane).
+
+### Reserved keys
+
+Press the **prefix** key, then one more key within 2 seconds. The status row shows `prefix…` while it waits.
+
+| Keys | Does |
+| --- | --- |
+| prefix, `g` (`give_back`) | hand an agent's browser back to the agent (nothing to hand back on a browser you started yourself) |
+| prefix, `q` (`quit`) | quit the viewer |
+| prefix, prefix | send the prefix key itself to the page |
+| prefix, anything else | cancels the prefix |
+
+The defaults are `ctrl-]`, `g` and `q`. Rebind them in `[keys]`: a key is a single character or a name (`escape`, `tab`, `enter`, `space`, `f1` to `f12`), optionally with `ctrl-` and `alt-` in front, e.g. `prefix = "ctrl-b"` or `give_back = "alt-g"`. A key that doesn't parse stops termbrowse with an error naming the file and the key.
+
+### Taking over from an agent
+
+Control applies to agent browsers only (`view --agent ID`, or `view --port` on an agent's port). A browser started by `termbrowse <url>` is always yours and never has a hand-back. The first mouse press, key press, paste or scroll in the pane takes control. Then:
+
+- The status row reads `you have control · Ctrl-] g to hand back`, with the keys from your config. While the agent holds the browser, it reads `agent · <url> · <fps>`. If the agent was in the middle of an action when you took control, the row says `agent was acting…` for about 2 seconds.
+- The agent's browser tool calls wait: `termbrowse mcp` holds each call until you hand the browser back. Nothing is dropped, and calls that need no browser (the tool list, for example) still answer.
+- You hand the browser back with the prefix and `give_back` keys, by quitting the viewer, or by leaving it idle for `idle_return` (default 5 minutes). If the viewer process dies, the agent notices within about a second.
+- The agent's first result after you hand back carries an extra text item: `Note from termbrowse: the user took control of this browser for <duration> (<while you waited|since your last action>). The page may have changed; it is now at <url>. Re-check the page (e.g. take a snapshot) before continuing.`
+- If you keep control for longer than `max_wait` (default 10 minutes) while a call waits, that call fails with the MCP error `termbrowse: the user has control of the browser; try again later` (code -32000), and the agent can try again.
+- If termbrowse can't write the control file, the viewer says `couldn't take control: <reason>` and the agent isn't blocked. Your input still reaches the page.
+
+Warning: the agent's tool call may time out on its own side before `max_wait`, because the call really is held. Raise your agent's MCP tool timeout, or lower `max_wait`:
+
+- Claude Code: set `MCP_TOOL_TIMEOUT` (milliseconds, for every server) or `"timeout"` in milliseconds on the server's entry in `.mcp.json`. When neither is set, Claude Code's own limit is about 28 hours, so this is only a problem if you've lowered it.
+- Codex: `tool_timeout_sec` on the server in `~/.codex/config.toml`. Its default is 60 seconds, shorter than most takeovers, so raise it (for example `tool_timeout_sec = 900`) if agents run in Codex.
+- Any other client: check your agent's MCP tool timeout setting.
+
 ## Filling the pane
 
 By default the viewer draws the page at the browser's own window size, scaled down to fit the pane, so it may leave empty space at the sides or bottom. When filling, the viewer tells Chrome to lay the page out at the pane's size instead (pane width × the height above the status row). It does this again when the pane is resized or the viewer switches tabs, and undoes it when you quit or switch away.
@@ -193,7 +242,7 @@ Two viewers on the same page (say `view --agent a1` in two panes) share one size
 
 ## Terminal support
 
-The viewer needs the Kitty graphics protocol. Before drawing, termbrowse checks the terminal:
+The viewer needs the Kitty graphics protocol. Ghostty, Kitty and Herdr work locally and over ssh (the graphics and your input travel through the ssh session as terminal bytes; Herdr in a remote terminal runs the viewer there). Before drawing, termbrowse checks the terminal:
 
 1. It recognises Herdr (`HC_TERMINAL_ID`), Kitty (`KITTY_WINDOW_ID`, `TERM=xterm-kitty`) and Ghostty (`TERM=xterm-ghostty`, `TERM_PROGRAM=ghostty`) from their environment variables.
 2. If it doesn't recognise the terminal, it sends the Kitty graphics query and waits for an answer.

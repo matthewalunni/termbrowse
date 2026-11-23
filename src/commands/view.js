@@ -17,7 +17,7 @@ export async function kindOfPort(port, p) {
   return kindOf((await readRegistry(p)).find((e) => e.port === port));
 }
 
-export async function runView(args, { stderr = process.stderr, env = process.env } = {}) {
+export async function runView(args, { stderr = process.stderr, env = process.env, viewer = runViewer } = {}) {
   const { values, positionals } = parse(args, {
     port: { type: 'string' },
     agent: { type: 'string' },
@@ -45,7 +45,7 @@ export async function runView(args, { stderr = process.stderr, env = process.env
   }
   const kind = values.agent !== undefined ? 'agent' : kindOf(entry);
   const cfg = await loadConfig(env);
-  return runViewer({
+  return viewer({
     port,
     match: values.tab,
     stderr,

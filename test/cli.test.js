@@ -8,7 +8,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { normalizeUrl, runBrowse } from '../src/commands/browse.js';
-import { kindOfPort } from '../src/commands/view.js';
+import { kindOfPort, runView } from '../src/commands/view.js';
 import { runLogin } from '../src/commands/login.js';
 import { browserVersion, listTargets } from '../src/cdp.js';
 import { freePort } from '../src/chrome.js';
@@ -466,4 +466,36 @@ test('view --port: the registry says whose browser a port is', async () => {
     await removeEntry('kind-agent', p);
     await removeEntry('standalone-k', p);
   }
+});
+
+// What view/browse hand the viewer: control.agentId decides whether the agent is made to wait.
+test('view --agent ID passes that agent id to the viewer; --port on an agent port passes the same id', async () => {
+  const [a, b] = [fakeChrome().pid, fakeChrome().pid];
+  await upsertEntry({ agentId: 'ctl-agent', pid: a, port: 40011, profileDir: '/x', kind: 'agent' }, p);
+  await upsertEntry({ agentId: 'standalone-ctl', pid: b, port: 40012, profileDir: '/y', kind: 'standalone' }, p);
+  const seen = [];
+  const viewer = async (opts) => { seen.push(opts); return 0; };
+  try {
+    for (const args of [['--agent', 'ctl-agent'], ['--port', '40011'], ['--port', '40012'], ['--port', '40013']]) {
+      assert.equal(await runView(args, { env, viewer, stderr: new PassThrough() }), 0);
+    }
+  } finally {
+    await removeEntry('ctl-agent', p);
+    await removeEntry('standalone-ctl', p);
+  }
+  assert.deepEqual(seen.map((o) => o.port), [40011, 40011, 40012, 40013]);
+  assert.deepEqual(seen.map((o) => o.control.agentId), ['ctl-agent', 'ctl-agent', null, null], 'only agent browsers are controlled');
+  assert.equal(seen[0].control.idleReturnMs, 300_000);
+  assert.equal(seen[0].keys.prefix.label, 'Ctrl-]');
+});
+
+test('browse passes null as the control agent id (standalone browsers never write a control file)', { skip, timeout: 60_000 }, async () => {
+  const t = fakeTerm();
+  let opts;
+  const code = await runBrowse('about:blank', {
+    ...t, pid: fakeChrome().pid, viewer: async (o) => { opts = o; return 0; },
+  });
+  assert.equal(code, 0);
+  assert.equal(opts.control.agentId, null);
+  assert.equal(opts.control.idleReturnMs, 300_000);
 });
