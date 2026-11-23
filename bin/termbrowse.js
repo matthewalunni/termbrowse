@@ -3,7 +3,7 @@ import { readFile } from 'node:fs/promises';
 
 const USAGE = `Usage: termbrowse [url]
        termbrowse view [url]
-       termbrowse mcp
+       termbrowse mcp [-- extra chrome-devtools-mcp args]
        termbrowse agents
        termbrowse stop [agent]
        termbrowse login
@@ -29,6 +29,11 @@ async function main(argv) {
     return 2;
   }
   const name = SUBCOMMANDS.has(first) ? first : 'view';
+  if (name === 'mcp') {
+    const rest = argv.slice(1);
+    const { runMcp } = await import('../src/mcp.js');
+    return runMcp(rest[0] === '--' ? rest.slice(1) : rest);
+  }
   process.stderr.write(`termbrowse: ${name} is not implemented yet\n`);
   return 1;
 }

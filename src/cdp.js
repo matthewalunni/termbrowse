@@ -18,9 +18,10 @@ export async function browserVersion(port) {
   }
 }
 
-export async function waitForPort(port, timeoutMs = 15000) {
+export async function waitForPort(port, timeoutMs = 15000, signal) {
   const deadline = Date.now() + timeoutMs;
   for (;;) {
+    signal?.throwIfAborted();
     if (await browserVersion(port)) return;
     if (Date.now() >= deadline) {
       throw new Error(`Chrome did not open its debugging port ${port} within ${timeoutMs} ms`);

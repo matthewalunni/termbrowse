@@ -125,3 +125,13 @@ http.createServer((q, r) => r.end('{"Browser":"fake"}')).listen(port, '127.0.0.1
   assert.ok(await waitDead(main), 'main pid alive');
   assert.ok(await waitDead(helper), 'helper pid alive');
 });
+
+test('chrome that exits before opening its port rejects at once with the exit code', async () => {
+  const exe = await fakeChrome('exit-chrome', 'exit 7');
+  const t0 = Date.now();
+  await assert.rejects(
+    launchChrome({ executablePath: exe, profileDir: join(tmp, 'px'), headless: true, windowSize: [1, 1], extraArgs: [], startTimeoutMs: 10_000 }),
+    /exited before opening its debugging port.*code 7/,
+  );
+  assert.ok(Date.now() - t0 < 2000, `took ${Date.now() - t0} ms`);
+});

@@ -82,6 +82,13 @@ export async function launchChrome({
   });
   const spawnFailed = new Promise((_, reject) => child.on('error', reject));
   spawnFailed.catch(() => {}); // the race below observes it; avoid an unhandled rejection meanwhile
+  // Fail fast when Chrome quits before its port opens (bad flags, profile in use, crash).
+  const exitedEarly = new Promise((_, reject) =>
+    child.once('exit', (code, sig) =>
+      reject(new Error(`Chrome exited before opening its debugging port (${sig ? `signal ${sig}` : `code ${code}`}); see ${tmpLog}`)),
+    ),
+  );
+  exitedEarly.catch(() => {});
   await fh.close();
   child.unref();
 
@@ -101,11 +108,14 @@ export async function launchChrome({
     clearTimeout(timer);
   };
 
+  const stopWaiting = new AbortController();
   try {
-    await Promise.race([spawnFailed, waitForPort(port, startTimeoutMs)]);
+    await Promise.race([spawnFailed, exitedEarly, waitForPort(port, startTimeoutMs, stopWaiting.signal)]);
   } catch (err) {
     await kill();
     throw err;
+  } finally {
+    stopWaiting.abort(); // stop polling once the race is decided
   }
   await rename(tmpLog, join(logs, `chrome-${child.pid}.log`)).catch(() => {});
   return { pid: child.pid, port, child, kill };

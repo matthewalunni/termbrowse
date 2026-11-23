@@ -7,6 +7,8 @@ const MARKER = '.termbrowse-last-used';
 const SKIP_FILES = new Set(['SingletonLock', 'SingletonSocket', 'SingletonCookie', 'DevToolsActivePort', 'lockfile']);
 const SKIP_DIRS = new Set(['Cache', 'Code Cache', 'GPUCache']);
 
+let tmpSeq = 0;
+
 const sanitize = (id) => {
   const s = String(id).replace(/[^A-Za-z0-9._-]/g, '_');
   return s === '' || s === '.' || s === '..' ? '_' : s;
@@ -28,7 +30,18 @@ export async function agentProfile(agentId, p = paths()) {
   if (!exists) {
     const hasStarter = await fs.stat(p.starter).then((s) => s.isDirectory(), () => false);
     if (hasStarter) {
-      await fs.cp(p.starter, dir, { recursive: true, filter: copyFilter });
+      // Copy aside, then rename into place, so a concurrent caller (e.g. a second wrapper
+      // for the same agent) never sees or uses a half-copied profile.
+      const tmp = `${dir}.tmp-${process.pid}-${++tmpSeq}`;
+      try {
+        await fs.cp(p.starter, tmp, { recursive: true, filter: copyFilter });
+        await fs.rename(tmp, dir);
+      } catch (e) {
+        if (e.code !== 'EEXIST' && e.code !== 'ENOTEMPTY') throw e;
+        // another caller won the race; its copy is complete
+      } finally {
+        await fs.rm(tmp, { recursive: true, force: true });
+      }
     } else {
       await fs.mkdir(dir, { recursive: true });
     }

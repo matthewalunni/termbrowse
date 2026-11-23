@@ -86,3 +86,13 @@ test('empty, "." and ".." ids stay strictly inside profiles', async () => {
   assert.equal(await exists(path.join(p.state, '.termbrowse-last-used')), false);
   assert.equal(await exists(path.join(p.profiles, '.termbrowse-last-used')), false);
 });
+
+test('concurrent agentProfile calls for one id yield one complete copy and no tmp dirs', async () => {
+  const p = await tmpPaths();
+  await fs.mkdir(path.join(p.starter, 'Default'), { recursive: true });
+  for (let i = 0; i < 200; i++) await fs.writeFile(path.join(p.starter, 'Default', `f${i}`), String(i));
+  const dirs = await Promise.all(Array.from({ length: 8 }, () => agentProfile('same', p)));
+  assert.ok(dirs.every((d) => d === path.join(p.profiles, 'same')));
+  assert.equal((await fs.readdir(path.join(p.profiles, 'same', 'Default'))).length, 200);
+  assert.deepEqual(await fs.readdir(p.profiles), ['same']);
+});

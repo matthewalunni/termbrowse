@@ -58,3 +58,21 @@ test('runHook with an empty command is a no-op (no log written)', async () => {
     await assert.rejects(readFile(join(dir, 'termbrowse', 'logs', 'hook.log')), { code: 'ENOENT' });
   });
 });
+
+test('runHook kills a hook that runs past its timeout and logs one line', async () => {
+  await withEnv(async (dir) => {
+    const pidfile = join(dir, 'hook.pid');
+    const t0 = Date.now();
+    // The sleep is a grandchild of sh: the whole group must go.
+    await runHook(`sleep 30 & echo $! > "${pidfile}"; wait`, { pid: 1, port: 2, agent: 'a', kind: 'agent' }, { timeoutMs: 300 });
+    assert.ok(Date.now() - t0 < 3000, `took ${Date.now() - t0} ms`);
+    const sleepPid = Number((await readFile(pidfile, 'utf8')).trim());
+    const end = Date.now() + 2000;
+    const alive = () => { try { process.kill(sleepPid, 0); return true; } catch { return false; } };
+    while (alive() && Date.now() < end) await new Promise((r) => setTimeout(r, 50));
+    assert.equal(alive(), false, 'hook grandchild still alive');
+    const log = await readFile(join(dir, 'termbrowse', 'logs', 'hook.log'), 'utf8');
+    assert.match(log, /timed out after 300 ms/);
+    assert.equal(log.trim().split('\n').length, 1);
+  });
+});

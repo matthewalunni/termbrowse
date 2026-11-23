@@ -14,7 +14,8 @@ async function logFailure(cmd, reason) {
   }
 }
 
-export async function runHook(cmd, { pid, port, agent, kind }) {
+// Never rejects. A hook still running after timeoutMs is killed (its whole process group).
+export async function runHook(cmd, { pid, port, agent, kind }, { timeoutMs = 10_000 } = {}) {
   if (!cmd) return;
   const env = {
     ...process.env,
@@ -25,9 +26,25 @@ export async function runHook(cmd, { pid, port, agent, kind }) {
     TERMBROWSE_BUNDLE_ID: bundleId(),
   };
   const reason = await new Promise((resolve) => {
-    const child = spawn('sh', ['-c', cmd], { env, stdio: 'ignore' });
-    child.once('error', (err) => resolve(`failed to start: ${err.message}`));
-    child.once('exit', (code, signal) => resolve(code === 0 ? null : `failed: ${signal ? `signal ${signal}` : `code ${code}`}`));
+    const child = spawn('sh', ['-c', cmd], { env, stdio: 'ignore', detached: true });
+    let timedOut = false;
+    const timer = setTimeout(() => {
+      timedOut = true;
+      try {
+        process.kill(-child.pid, 'SIGKILL');
+      } catch {
+        child.kill('SIGKILL');
+      }
+    }, timeoutMs);
+    const done = (reason) => {
+      clearTimeout(timer);
+      resolve(reason);
+    };
+    child.once('error', (err) => done(`failed to start: ${err.message}`));
+    child.once('exit', (code, signal) => {
+      if (timedOut) done(`timed out after ${timeoutMs} ms (killed)`);
+      else done(code === 0 ? null : `failed: ${signal ? `signal ${signal}` : `code ${code}`}`);
+    });
   });
   if (reason) await logFailure(cmd, reason);
 }
