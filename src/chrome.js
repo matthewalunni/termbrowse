@@ -12,21 +12,24 @@ export function bundleId(platform = process.platform) {
   return platform === 'darwin' ? 'com.google.chrome.for.testing' : '';
 }
 
-export async function ensureChrome(cfg, p = paths()) {
+// Where the configured channel's current Chrome for Testing lives, and whether it is there yet.
+// Resolving the channel's build id needs the network.
+export async function findChrome(cfg, p = paths()) {
   const platform = detectBrowserPlatform();
   if (!platform) throw new Error(`Chrome for Testing has no build for ${process.platform}/${process.arch}`);
   const buildId = await resolveBuildId(Browser.CHROME, platform, cfg.chrome.channel);
   const cacheDir = join(p.cache, 'browsers');
   const executablePath = computeExecutablePath({ cacheDir, browser: Browser.CHROME, buildId });
-  try {
-    await access(executablePath, constants.X_OK);
-    return { executablePath, buildId };
-  } catch {
-    // not installed yet
-  }
+  const installed = await access(executablePath, constants.X_OK).then(() => true, () => false);
+  return { platform, buildId, cacheDir, executablePath, installed };
+}
+
+export async function ensureChrome(cfg, p = paths()) {
+  const { platform, buildId, cacheDir, executablePath, installed } = await findChrome(cfg, p);
+  if (installed) return { executablePath, buildId };
   process.stderr.write(`termbrowse: downloading Chrome for Testing ${buildId} (one time)...\n`);
-  const installed = await install({ cacheDir, browser: Browser.CHROME, buildId, platform });
-  return { executablePath: installed.executablePath, buildId };
+  const result = await install({ cacheDir, browser: Browser.CHROME, buildId, platform });
+  return { executablePath: result.executablePath, buildId };
 }
 
 export function freePort() {

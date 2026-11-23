@@ -1,20 +1,30 @@
 #!/usr/bin/env node
 import { readFile } from 'node:fs/promises';
 
-const USAGE = `Usage: termbrowse [url]
-       termbrowse view [url]
+const USAGE = `Usage: termbrowse <url>
+       termbrowse view (--port N | --agent ID) [--tab MATCH]
        termbrowse mcp [-- extra chrome-devtools-mcp args]
-       termbrowse agents
-       termbrowse stop [agent]
-       termbrowse login
+       termbrowse agents [--json]
+       termbrowse stop (--agent ID | --all)
+       termbrowse login [url] [--reset]
        termbrowse doctor
        termbrowse --version
 `;
 
-const SUBCOMMANDS = new Set(['view', 'mcp', 'agents', 'stop', 'login', 'doctor']);
+const COMMANDS = {
+  view: async (args) => (await import('../src/commands/view.js')).runView(args),
+  agents: async (args) => (await import('../src/commands/agents.js')).runAgents(args),
+  stop: async (args) => (await import('../src/commands/stop.js')).runStop(args),
+  login: async (args) => (await import('../src/commands/login.js')).runLogin(args),
+  doctor: async (args) => (await import('../src/commands/doctor.js')).runDoctor(args),
+  mcp: async (args) => {
+    const { runMcp } = await import('../src/mcp.js');
+    return runMcp(args[0] === '--' ? args.slice(1) : args);
+  },
+};
 
 async function main(argv) {
-  const [first] = argv;
+  const [first, ...rest] = argv;
   if (first === '--version' || first === '-v') {
     const pkg = JSON.parse(await readFile(new URL('../package.json', import.meta.url), 'utf8'));
     console.log(pkg.version);
@@ -24,18 +34,28 @@ async function main(argv) {
     process.stdout.write(USAGE);
     return 0;
   }
-  if (first?.startsWith('-')) {
+  if (first === undefined) {
+    process.stderr.write(USAGE);
+    return 2;
+  }
+  if (first.startsWith('-')) {
     process.stderr.write(`termbrowse: unknown option ${first}\n${USAGE}`);
     return 2;
   }
-  const name = SUBCOMMANDS.has(first) ? first : 'view';
-  if (name === 'mcp') {
-    const rest = argv.slice(1);
-    const { runMcp } = await import('../src/mcp.js');
-    return runMcp(rest[0] === '--' ? rest.slice(1) : rest);
+  const { UsageError } = await import('../src/commands/usage.js');
+  try {
+    if (Object.hasOwn(COMMANDS, first)) return await COMMANDS[first](rest);
+    if (rest.length) throw new UsageError(`unexpected argument ${rest[0]} after the URL`);
+    const { runBrowse } = await import('../src/commands/browse.js');
+    return await runBrowse(first);
+  } catch (err) {
+    if (err instanceof UsageError) {
+      process.stderr.write(`termbrowse: ${err.message}\n${USAGE}`);
+      return 2;
+    }
+    process.stderr.write(`termbrowse: ${err.message}\n`);
+    return 1;
   }
-  process.stderr.write(`termbrowse: ${name} is not implemented yet\n`);
-  return 1;
 }
 
 process.exitCode = await main(process.argv.slice(2));

@@ -24,8 +24,11 @@ async function copyFilter(src) {
   return true;
 }
 
-export async function agentProfile(agentId, p = paths()) {
-  const dir = path.join(p.profiles, sanitize(agentId));
+export const agentProfile = (agentId, p = paths()) => profileFromStarter(path.join(p.profiles, sanitize(agentId)), p);
+
+// Ensures `dir` exists as a Chrome profile, copied from the starter profile the first time
+// (when there is one), and marks it used now.
+export async function profileFromStarter(dir, p = paths()) {
   const exists = await fs.stat(dir).then(() => true, () => false);
   if (!exists) {
     const hasStarter = await fs.stat(p.starter).then((s) => s.isDirectory(), () => false);

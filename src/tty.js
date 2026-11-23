@@ -62,14 +62,19 @@ export async function termSize(stdin, stdout, timeoutMs = 800) {
 }
 
 // Terminals known to draw Kitty graphics, some of which (Herdr) don't answer the query.
-export function knownKittyTerminal(env = process.env) {
-  if (env.TERMBROWSE_ASSUME_KITTY === '1') return true;
-  if (env.HC_TERMINAL_ID || env.KITTY_WINDOW_ID) return true;
+// Returns what identified it (an env var, or TERM=/TERM_PROGRAM=<value>), else null.
+export function kittyTerminalName(env = process.env) {
+  if (env.TERMBROWSE_ASSUME_KITTY === '1') return 'TERMBROWSE_ASSUME_KITTY';
+  if (env.HC_TERMINAL_ID) return 'Herdr';
+  if (env.KITTY_WINDOW_ID) return 'Kitty';
   const term = (env.TERM ?? '').toLowerCase();
-  if (term === 'xterm-kitty' || term === 'xterm-ghostty') return true;
+  if (term === 'xterm-kitty' || term === 'xterm-ghostty') return `TERM=${env.TERM}`;
   const program = (env.TERM_PROGRAM ?? '').toLowerCase();
-  return program === 'ghostty' || program === 'wezterm';
+  if (program === 'ghostty' || program === 'wezterm') return `TERM_PROGRAM=${env.TERM_PROGRAM}`;
+  return null;
 }
+
+export const knownKittyTerminal = (env = process.env) => kittyTerminalName(env) !== null;
 
 export async function detectKitty(stdin, stdout, timeoutMs = 800, env = process.env) {
   if (knownKittyTerminal(env)) return true;

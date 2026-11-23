@@ -1,0 +1,241 @@
+import { test, after } from 'node:test';
+import assert from 'node:assert/strict';
+import { spawn } from 'node:child_process';
+import { EventEmitter } from 'node:events';
+import { PassThrough } from 'node:stream';
+import { mkdtemp, mkdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { normalizeUrl, runBrowse } from '../src/commands/browse.js';
+import { kittyQuery } from '../src/kitty.js';
+import { paths } from '../src/paths.js';
+import { upsertEntry, readRegistry } from '../src/registry.js';
+import { startFakeCdp } from './helpers/fake-cdp.js';
+
+const BIN = fileURLToPath(new URL('../bin/termbrowse.js', import.meta.url));
+const skip = process.env.TERMBROWSE_SKIP_CHROME === '1' ? 'TERMBROWSE_SKIP_CHROME=1' : false;
+
+// Isolated state and config, also for the in-process runBrowse test (launchChrome reads
+// process.env). HOME, and so the Chrome for Testing download cache, stays real.
+const tmp = await mkdtemp(join(tmpdir(), 'tb-cli-'));
+const hookOut = join(tmp, 'hook.out');
+process.env.XDG_STATE_HOME = join(tmp, 'state');
+process.env.XDG_CONFIG_HOME = join(tmp, 'config');
+process.env.HOOKOUT = hookOut;
+for (const k of ['TERMBROWSE_CONFIG', 'TERMBROWSE_AGENT', 'TERMBROWSE_ASSUME_KITTY', 'HC_TERMINAL_ID', 'KITTY_WINDOW_ID', 'TERM_PROGRAM']) delete process.env[k];
+process.env.TERM = 'dumb';
+const env = { ...process.env };
+const p = paths(env);
+await mkdir(join(tmp, 'config', 'termbrowse'), { recursive: true });
+await writeFile(p.config, '[chrome]\nheadless = true\n\n[hooks]\non_launch = "echo $TERMBROWSE_KIND [$TERMBROWSE_AGENT] > $HOOKOUT"\n');
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+async function until(fn, ms = 5000) {
+  const end = Date.now() + ms;
+  for (;;) {
+    const v = await fn();
+    if (v || Date.now() > end) return v;
+    await sleep(50);
+  }
+}
+
+// Fake Kitty terminal (as in viewer.test.js): answers the Kitty query and the size queries.
+function fakeTerm() {
+  const ESC = '\x1b';
+  const stdout = new PassThrough();
+  stdout.isTTY = true;
+  stdout.columns = 80;
+  stdout.rows = 24;
+  let out = '';
+  stdout.on('data', (d) => { out += d; });
+  const stdin = new PassThrough();
+  stdin.isTTY = true;
+  stdin.isRaw = false;
+  stdin.setRawMode = (v) => { stdin.isRaw = v; return stdin; };
+  const write = stdout.write.bind(stdout);
+  stdout.write = (chunk, ...rest) => {
+    const s = String(chunk);
+    if (s.includes(kittyQuery())) setImmediate(() => stdin.write(`${ESC}_Gi=31;OK${ESC}\\${ESC}[?62;c`));
+    else if (s.includes(`${ESC}[16t`)) setImmediate(() => stdin.write(`${ESC}[6;20;10t${ESC}[4;480;800t${ESC}[?62;c`));
+    return write(chunk, ...rest);
+  };
+  const stderr = new PassThrough();
+  return { stdin, stdout, stderr, env, signals: new EventEmitter(), out: () => out };
+}
+
+const children = [];
+after(async () => {
+  for (const c of children) if (c.exitCode === null) c.kill('SIGKILL');
+  await rm(tmp, { recursive: true, force: true });
+});
+
+function run(args, extraEnv = {}) {
+  return new Promise((resolve) => {
+    const child = spawn(process.execPath, [BIN, ...args], { env: { ...env, ...extraEnv }, stdio: ['ignore', 'pipe', 'pipe'] });
+    let stdout = '';
+    let stderr = '';
+    child.stdout.on('data', (d) => (stdout += d));
+    child.stderr.on('data', (d) => (stderr += d));
+    child.on('exit', (code) => resolve({ code, stdout, stderr }));
+  });
+}
+
+const alive = (pid) => {
+  try { process.kill(pid, 0); return true; } catch { return false; }
+};
+
+// A live process standing in for a Chrome (registry entries need a live pid), leading its own group.
+function fakeChrome() {
+  const c = spawn('sleep', ['60'], { detached: true, stdio: 'ignore' });
+  children.push(c);
+  return c;
+}
+
+test('normalizeUrl adds a scheme where one is missing', () => {
+  assert.equal(normalizeUrl('localhost:3000'), 'http://localhost:3000');
+  assert.equal(normalizeUrl('localhost'), 'http://localhost');
+  assert.equal(normalizeUrl('127.0.0.1:8080/x'), 'http://127.0.0.1:8080/x');
+  assert.equal(normalizeUrl('example.com'), 'https://example.com');
+  assert.equal(normalizeUrl('example.com:8443/a'), 'https://example.com:8443/a');
+  assert.equal(normalizeUrl('file:///x'), 'file:///x');
+  assert.equal(normalizeUrl('http://localhost:3000'), 'http://localhost:3000');
+  assert.equal(normalizeUrl('about:blank'), 'about:blank');
+});
+
+test('view with both --port and --agent is a usage error', async () => {
+  const r = await run(['view', '--port', '9222', '--agent', 'a']);
+  assert.equal(r.code, 2);
+  assert.match(r.stderr, /Usage/);
+});
+
+test('view with neither --port nor --agent is a usage error', async () => {
+  const r = await run(['view']);
+  assert.equal(r.code, 2);
+});
+
+test('view --agent with no live browser explains and exits 1', async () => {
+  const r = await run(['view', '--agent', 'nobody']);
+  assert.equal(r.code, 1);
+  assert.equal(r.stderr, "termbrowse: no browser for agent nobody (it starts on the agent's first browser action)\n");
+});
+
+test('agents --json prints [] with empty state', async () => {
+  const r = await run(['agents', '--json']);
+  assert.equal(r.code, 0);
+  assert.deepEqual(JSON.parse(r.stdout), []);
+});
+
+test('agents lists live entries with their first page URL, - when unreachable', async () => {
+  const cdp = await startFakeCdp();
+  const a = fakeChrome();
+  const b = fakeChrome();
+  try {
+    await upsertEntry({ agentId: 'alpha', pid: a.pid, port: cdp.port, profileDir: '/x', kind: 'agent' }, p);
+    await upsertEntry({ agentId: 'standalone-1', pid: b.pid, port: 1, profileDir: '/y', kind: 'standalone' }, p);
+    const r = await run(['agents']);
+    assert.equal(r.code, 0);
+    const lines = r.stdout.trimEnd().split('\n').map((l) => l.trim().split(/\s+/));
+    assert.deepEqual(lines[0], ['AGENT', 'KIND', 'PORT', 'PID', 'URL']);
+    assert.deepEqual(lines[1], ['alpha', 'agent', String(cdp.port), String(a.pid), 'https://example.com/']);
+    assert.deepEqual(lines[2], ['standalone-1', 'standalone', '1', String(b.pid), '-']);
+    const j = await run(['agents', '--json']);
+    assert.deepEqual(JSON.parse(j.stdout).map((e) => [e.agentId, e.url]), [['alpha', 'https://example.com/'], ['standalone-1', null]]);
+  } finally {
+    await cdp.close();
+    a.kill('SIGKILL');
+    b.kill('SIGKILL');
+  }
+});
+
+test('stop --agent kills that Chrome and removes its entry; --all stops the rest', async () => {
+  const a = fakeChrome();
+  const b = fakeChrome();
+  await upsertEntry({ agentId: 'one', pid: a.pid, port: 1, profileDir: '/x', kind: 'agent' }, p);
+  await upsertEntry({ agentId: 'two', pid: b.pid, port: 2, profileDir: '/y', kind: 'agent' }, p);
+
+  let r = await run(['stop', '--agent', 'one']);
+  assert.equal(r.code, 0);
+  assert.match(r.stdout, new RegExp(`stopped one \\(pid ${a.pid}, port 1\\)`));
+  assert.equal(alive(a.pid) && a.exitCode === null, false);
+  assert.deepEqual((await readRegistry(p)).map((e) => e.agentId), ['two']);
+
+  r = await run(['stop', '--agent', 'one']);
+  assert.equal(r.code, 1);
+  assert.match(r.stderr, /no browser for agent one/);
+
+  r = await run(['stop', '--all']);
+  assert.equal(r.code, 0);
+  assert.match(r.stdout, /stopped two/);
+  assert.deepEqual(await readRegistry(p), []);
+
+  r = await run(['stop', '--all']);
+  assert.equal(r.code, 0);
+  assert.match(r.stdout, /nothing to stop/);
+});
+
+test('stop needs exactly one of --agent and --all', async () => {
+  assert.equal((await run(['stop'])).code, 2);
+  assert.equal((await run(['stop', '--agent', 'x', '--all'])).code, 2);
+});
+
+test('doctor prints a Node line that is ok', async () => {
+  const r = await run(['doctor']);
+  const node = r.stdout.split('\n').find((l) => /\bNode\b/.test(l));
+  assert.ok(node, r.stdout);
+  assert.match(node, /\bok\b/);
+});
+
+test('doctor fails on a config that does not parse', async () => {
+  const r = await run(['doctor'], { TERMBROWSE_CONFIG: fileURLToPath(new URL('../package.json', import.meta.url)) });
+  assert.equal(r.code, 1);
+  assert.match(r.stdout.split('\n').find((l) => /config/i.test(l)), /\bfail\b/);
+});
+
+test('doctor reports a known Kitty terminal without querying', async () => {
+  const r = await run(['doctor'], { TERMBROWSE_ASSUME_KITTY: '1' });
+  assert.match(r.stdout.split('\n').find((l) => /Kitty/.test(l)), /ok \(known terminal: TERMBROWSE_ASSUME_KITTY\)/);
+});
+
+test('a bare argument is a URL to browse (refused here: not a terminal, before any Chrome starts)', async () => {
+  const r = await run(['example.com']);
+  assert.equal(r.code, 2);
+  assert.match(r.stderr, /doesn't support Kitty graphics/);
+  assert.deepEqual(await readRegistry(p), []);
+});
+
+test('unknown options and extra arguments after the URL are usage errors', async () => {
+  assert.equal((await run(['--bogus'])).code, 2);
+  assert.equal((await run(['example.com', 'more'])).code, 2);
+  assert.equal((await run(['agents', '--nope'])).code, 2);
+});
+
+test('browse: standalone Chrome copied from the starter, registered, drawn, and closed on SIGTERM', { skip, timeout: 60_000 }, async () => {
+  await mkdir(p.starter, { recursive: true });
+  await writeFile(join(p.starter, 'from-starter'), 'x');
+  await writeFile(join(p.starter, 'SingletonLock'), 'x');
+  const t = fakeTerm();
+  const result = runBrowse('data:text/html,<body style="background:red">hi</body>', t);
+  const entry = await until(async () => (await readRegistry(p)).find((e) => e.kind === 'standalone'), 30_000);
+  assert.ok(entry, 'standalone entry registered');
+  assert.equal(entry.agentId, `standalone-${process.pid}`);
+  assert.equal(entry.wrapperPid, process.pid);
+  assert.equal(entry.profileDir, join(p.state, 'standalone'));
+  assert.ok(alive(entry.pid));
+  await stat(join(entry.profileDir, 'from-starter'));
+  await assert.rejects(stat(join(entry.profileDir, 'SingletonLock')));
+  assert.ok(await until(() => t.out().includes('\x1b_G'), 15_000), 'a Kitty frame was drawn');
+  assert.equal((await until(async () => (await readFile(hookOut, 'utf8').catch(() => '')).trim(), 15_000)), 'standalone []');
+
+  t.signals.emit('SIGTERM');
+  assert.equal(await result, 0);
+  assert.equal(alive(entry.pid), false);
+  assert.deepEqual(await readRegistry(p), []);
+  assert.equal(t.signals.listenerCount('SIGTERM'), 0);
+});
+
+test('no arguments prints usage and exits 2', async () => {
+  const r = await run([]);
+  assert.equal(r.code, 2);
+  assert.match(r.stderr, /Usage/);
+});

@@ -82,7 +82,8 @@ const ORPHAN_GRACE_MS = 2000;
 // cleaning up (SIGKILL, crash), yet the Chrome lives on in its own process group.
 const orphaned = (e) => Number.isInteger(e.wrapperPid) && e.wrapperPid > 0 && alive(e.pid) && !alive(e.wrapperPid);
 
-async function killGroup(pid) {
+// SIGTERM the process group led by pid, SIGKILL after a grace period; resolves once it is gone.
+export async function killGroup(pid) {
   const signal = (sig) => {
     try {
       process.kill(-pid, sig);
