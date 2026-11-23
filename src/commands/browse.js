@@ -43,15 +43,18 @@ export async function runBrowse(
   const cfg = await loadConfig(env);
   await pruneProfiles(cfg.agents.pruneDays, p).catch((err) => stderr.write(`termbrowse: pruning profiles failed: ${err.message}\n`));
 
-  // A signal before the viewer is up: exit at once if no Chrome is starting yet, else clean up below.
-  let interrupted = false;
+  // A signal before the viewer is up: exit at once if no Chrome is starting yet, else clean up
+  // below. One that lands while the viewer starts (its own handlers are not attached until its
+  // terminal queries and CDP connect are done) is passed on to the viewer once they are.
+  let interrupted = null; // the signal, once one arrived
   let chrome = null;
   let launching = false;
-  const onSignal = () => {
-    interrupted = true;
+  const onSignal = (sig) => {
+    interrupted ??= sig;
     if (!chrome && !launching) process.exit(130);
   };
-  for (const sig of SIGNALS) signals.on(sig, onSignal);
+  const handlers = SIGNALS.map((sig) => [sig, () => onSignal(sig)]);
+  for (const [sig, fn] of handlers) signals.on(sig, fn);
 
   const agentId = `standalone-${pid}`;
   const profileDir = standaloneProfileDir(pid, p);
@@ -83,9 +86,18 @@ export async function runBrowse(
     ).catch((err) => stderr.write(`termbrowse: could not record Chrome in the registry: ${err.message}\n`));
     if (interrupted) return 130;
     announce(cfg, chrome); // fire and forget: the viewer must not wait on a hook (runHook never rejects)
-    return await runViewer({ port: chrome.port, stdin, stdout, stderr, env, signals });
+    return await runViewer({
+      port: chrome.port,
+      stdin,
+      stdout,
+      stderr,
+      env,
+      signals,
+      // Signals after this point reach the viewer directly; replay one it could not see.
+      onReady: () => { if (interrupted) signals.emit(interrupted, interrupted); },
+    });
   } finally {
-    for (const sig of SIGNALS) signals.off(sig, onSignal);
+    for (const [sig, fn] of handlers) signals.off(sig, fn);
     if (chrome) {
       await chrome.kill();
       await removeEntry(agentId, p).catch(() => {});

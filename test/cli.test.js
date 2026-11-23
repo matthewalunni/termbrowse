@@ -44,7 +44,7 @@ async function until(fn, ms = 5000) {
 }
 
 // Fake Kitty terminal (as in viewer.test.js): answers the Kitty query and the size queries.
-function fakeTerm() {
+function fakeTerm({ replyDelayMs = 0 } = {}) {
   const ESC = '\x1b';
   const stdout = new PassThrough();
   stdout.isTTY = true;
@@ -59,7 +59,7 @@ function fakeTerm() {
   const write = stdout.write.bind(stdout);
   stdout.write = (chunk, ...rest) => {
     const s = String(chunk);
-    if (s.includes(kittyQuery())) setImmediate(() => stdin.write(`${ESC}_Gi=31;OK${ESC}\\${ESC}[?62;c`));
+    if (s.includes(kittyQuery())) setTimeout(() => stdin.write(`${ESC}_Gi=31;OK${ESC}\\${ESC}[?62;c`), replyDelayMs);
     else if (s.includes(`${ESC}[16t`)) setImmediate(() => stdin.write(`${ESC}[6;20;10t${ESC}[4;480;800t${ESC}[?62;c`));
     return write(chunk, ...rest);
   };
@@ -213,8 +213,8 @@ test('unknown options and extra arguments after the URL are usage errors', async
   assert.equal((await run(['agents', '--nope'])).code, 2);
 });
 
-async function startBrowse(pid) {
-  const t = fakeTerm();
+async function startBrowse(pid, termOptions) {
+  const t = fakeTerm(termOptions);
   const result = runBrowse('data:text/html,<body style="background:red">hi</body>', { ...t, pid });
   const entry = await until(async () => (await readRegistry(p)).find((e) => e.agentId === `standalone-${pid}`), 30_000);
   return { t, result, entry };
@@ -252,6 +252,22 @@ test('browse: fresh starter copy per run, registered, drawn, closed and deleted 
   assert.equal(await b.result, 0);
   await assert.rejects(stat(b.entry.profileDir));
   assert.deepEqual(await readRegistry(p), []);
+});
+
+test('browse: a signal while the viewer is still starting ends the run and cleans up', { skip, timeout: 60_000 }, async () => {
+  const pid = fakeChrome().pid;
+  // The Kitty reply comes late, so the viewer is still in its startup when the signal lands.
+  const { t, result, entry } = await startBrowse(pid, { replyDelayMs: 600 });
+  assert.ok(entry, 'standalone entry registered');
+  t.signals.emit('SIGTERM');
+  const code = await Promise.race([result, sleep(10_000).then(() => 'hung')]);
+  if (code === 'hung') t.signals.emit('SIGTERM'); // let the run end so the test can clean up
+  assert.notEqual(code, 'hung', 'the signal during viewer startup was swallowed');
+  assert.equal(code, 0);
+  assert.equal(alive(entry.pid), false);
+  assert.deepEqual(await readRegistry(p), []);
+  await assert.rejects(stat(entry.profileDir));
+  assert.equal(t.signals.listenerCount('SIGTERM'), 0);
 });
 
 // Login with a headless Chrome (tests must not open windows) and a short save delay.
