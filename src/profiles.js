@@ -9,7 +9,7 @@ const SKIP_DIRS = new Set(['Cache', 'Code Cache', 'GPUCache']);
 
 let tmpSeq = 0;
 
-const sanitize = (id) => {
+export const sanitize = (id) => {
   const s = String(id).replace(/[^A-Za-z0-9._-]/g, '_');
   return s === '' || s === '.' || s === '..' ? '_' : s;
 };
