@@ -102,3 +102,27 @@ test('repeated reads of a corrupt registry keep exactly one copy', async () => {
   assert.equal(copies.length, 1);
   assert.deepEqual(await readRegistry(p), []);
 });
+
+test('an entry whose wrapper died has its Chrome process group killed and is dropped', async () => {
+  const { spawn } = await import('node:child_process');
+  const p = await tmpPaths();
+  // A real dead pid: a process that has already exited (and been reaped).
+  const gone = spawn('/bin/sh', ['-c', 'exit 0']);
+  await new Promise((r) => gone.once('exit', r));
+  // The "Chrome": a detached sleeper leading its own group, with a helper in that group.
+  const chrome = spawn('/bin/sh', ['-c', 'sleep 60 & wait'], { detached: true, stdio: 'ignore' });
+  const chromeExit = new Promise((r) => chrome.once('exit', r));
+  const alive = (pid) => { try { process.kill(pid, 0); return true; } catch { return false; } };
+  try {
+    await upsertEntry(entry('orphan', { pid: chrome.pid, wrapperPid: gone.pid }), p);
+    await upsertEntry(entry('owned'), p);
+    const got = await readRegistry(p);
+    assert.deepEqual(got.map((e) => e.agentId), ['owned']);
+    await chromeExit;
+    assert.equal(alive(chrome.pid), false);
+    assert.throws(() => process.kill(-chrome.pid, 0), { code: 'ESRCH' }, 'process group still has members');
+    assert.deepEqual((await readRegistry(p)).map((e) => e.agentId), ['owned']);
+  } finally {
+    try { process.kill(-chrome.pid, 'SIGKILL'); } catch {}
+  }
+});

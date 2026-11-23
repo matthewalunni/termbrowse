@@ -178,6 +178,17 @@ test('SIGTERM shuts down the same way', { skip, timeout: 30_000 }, async () => {
   assert.equal(await findEntry('test-b', p), null);
 });
 
+test('SIGHUP (terminal pane closed) shuts down the same way', { skip, timeout: 60_000 }, async () => {
+  const h = new Wrapper('test-h');
+  await h.init();
+  assert.ok(!(await h.call('list_pages')).result.isError);
+  const e = await findEntry('test-h', p);
+  h.child.kill('SIGHUP');
+  assert.equal(await h.exit, 0);
+  assert.ok(await until(() => !alive(e.pid), 5000), 'chrome still alive');
+  assert.equal(await findEntry('test-h', p), null);
+});
+
 test('a failed launch answers the tools/call with an error; the next call retries', { skip, timeout: 120_000 }, async () => {
   // A regular file where the profile dir should be makes the launch fail.
   const blocker = join(p.profiles, 'test-c');

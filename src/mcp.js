@@ -184,15 +184,14 @@ export async function runMcp(extraArgs = [], { stdin = process.stdin, stdout = p
   stdin.setEncoding('utf8');
   stdin.on('data', onData);
   stdin.on('end', onEnd);
-  process.on('SIGTERM', stop);
-  process.on('SIGINT', stop);
+  // SIGHUP: closing the agent's terminal pane hangs up its foreground process group, us included.
+  for (const sig of ['SIGTERM', 'SIGINT', 'SIGHUP']) process.on(sig, stop);
 
   const { code } = await childExit;
   clearTimeout(killTimer);
   const stopRequested = stopping;
   stopping = true;
-  process.off('SIGTERM', stop);
-  process.off('SIGINT', stop);
+  for (const sig of ['SIGTERM', 'SIGINT', 'SIGHUP']) process.off(sig, stop);
   stdin.off('data', onData);
   stdin.off('end', onEnd);
   stdin.pause();

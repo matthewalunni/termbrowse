@@ -76,12 +76,37 @@ const modify = (p, change) =>
     await save(change(list), p);
   });
 
+const ORPHAN_GRACE_MS = 2000;
+
+// The process that launched this Chrome (MCP wrapper or standalone termbrowse) died without
+// cleaning up (SIGKILL, crash), yet the Chrome lives on in its own process group.
+const orphaned = (e) => Number.isInteger(e.wrapperPid) && e.wrapperPid > 0 && alive(e.pid) && !alive(e.wrapperPid);
+
+async function killGroup(pid) {
+  const signal = (sig) => {
+    try {
+      process.kill(-pid, sig);
+    } catch {
+      try { process.kill(pid, sig); } catch { /* already gone */ }
+    }
+  };
+  signal('SIGTERM');
+  const end = Date.now() + ORPHAN_GRACE_MS;
+  while (alive(pid) && Date.now() < end) await sleep(50);
+  if (alive(pid)) signal('SIGKILL');
+}
+
 export async function readRegistry(p = paths()) {
   const { list, corrupt } = await load(p);
-  const live = list.filter((e) => alive(e.pid));
+  const orphans = list.filter(orphaned);
+  // Killed outside the lock: the grace period could outlast the lock timeout of other callers.
+  await Promise.all(orphans.map((e) => killGroup(e.pid)));
+  const swept = new Set(orphans.map((e) => e.pid));
+  const keep = (e) => alive(e.pid) && !swept.has(e.pid);
+  const live = list.filter(keep);
   if (!corrupt && live.length === list.length) return live;
   // Re-read under the lock so a concurrent upsert is not overwritten.
-  await modify(p, (cur) => cur.filter((e) => alive(e.pid)));
+  await modify(p, (cur) => cur.filter(keep));
   return (await load(p)).list;
 }
 
