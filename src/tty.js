@@ -73,6 +73,8 @@ export function knownKittyTerminal(env = process.env) {
 
 export async function detectKitty(stdin, stdout, timeoutMs = 800, env = process.env) {
   if (knownKittyTerminal(env)) return true;
-  const buf = await ask(stdin, stdout, kittyQuery(), (b) => parseKittyReply(b) !== null, timeoutMs);
+  // The query ends with DA1, which terminals answer after the graphics reply: wait for it so a
+  // late DA1 isn't left buffered for the next query (termSize uses DA1 as its end marker).
+  const buf = await ask(stdin, stdout, kittyQuery(), (b) => DA1.test(b), timeoutMs);
   return parseKittyReply(buf) === true;
 }

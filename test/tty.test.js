@@ -132,3 +132,19 @@ test('detectKitty skips the query for a known terminal and queries otherwise', a
   assert.equal(await p, false);
   assert.equal(b.out(), kittyQuery());
 });
+
+test('a DA1 that trails the Kitty OK is consumed by detectKitty, not mistaken by termSize', async () => {
+  const { stdin, stdout } = streams();
+  const k = detectKitty(stdin, stdout, 500, {});
+  setImmediate(() => {
+    stdin.write('\x1b_Gi=31;OK\x1b\\');
+    setImmediate(() => stdin.write('\x1b[?62;c'));
+  });
+  assert.equal(await k, true);
+  const p = termSize(stdin, stdout, 500);
+  setImmediate(() => {
+    stdin.write('\x1b[6;37;17t\x1b[4;14');
+    setImmediate(() => stdin.write('80;1037t\x1b[?62;c'));
+  });
+  assert.deepEqual(await p, { cols: 61, rows: 40, pxW: 1037, pxH: 1480 });
+});
