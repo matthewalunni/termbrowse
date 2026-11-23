@@ -172,3 +172,42 @@ test('flush leaves an incomplete mouse sequence pending', () => {
   assert.deepEqual(p.flush(), []);
   assert.equal(p.push('0;5M')[0].action, 'press');
 });
+
+test('legacy-form Kitty releases are dropped and repeats marked', () => {
+  assert.deepEqual(parse(`${ESC}[1;1:3D`), []);
+  assert.deepEqual(parse(`${ESC}[3;5:3~`), []);
+  const [left] = parse(`${ESC}[1;5D`);
+  assert.equal(left.key, 'ArrowLeft');
+  assert.equal(left.ctrl, true);
+  assert.equal(left.repeat, false);
+  const [rep] = parse(`${ESC}[1;1:2A`);
+  assert.equal(rep.key, 'ArrowUp');
+  assert.equal(rep.repeat, true);
+});
+
+test('Kitty shifted symbols use associated text and alternate keys', () => {
+  const [bang] = parse(`${ESC}[49:33;2;33u`);
+  assert.equal(bang.key, '!');
+  assert.equal(bang.text, '!');
+  assert.equal(bang.shift, true);
+  const [at] = parse(`${ESC}[50:64;2;64u`);
+  assert.equal(at.key, '@');
+  assert.equal(at.text, '@');
+  const [altOnly] = parse(`${ESC}[49:33;2u`);
+  assert.equal(altOnly.key, '!');
+  assert.equal(altOnly.text, '!');
+});
+
+test('Kitty caps lock takes the key from associated text', () => {
+  const [ev] = parse(`${ESC}[97;65;65u`);
+  assert.equal(ev.key, 'A');
+  assert.equal(ev.text, 'A');
+  const [plain] = parse(`${ESC}[97u`);
+  assert.equal(plain.key, 'a');
+  assert.equal(plain.text, 'a');
+});
+
+test('SGR extra buttons (128+) are dropped', () => {
+  assert.deepEqual(parse(`${ESC}[<128;5;5M`), []);
+  assert.deepEqual(parse(`${ESC}[<129;5;5m`), []);
+});

@@ -35,10 +35,15 @@ function keyEvent(key, { shift = false, alt = false, ctrl = false, meta = false,
   return ev;
 }
 
-// xterm-style modifier parameter: 1 + bits (shift 1, alt 2, ctrl 4, super 8, hyper 16, meta 32).
-function decodeMods(param) {
+// Modifier field "mods[:event]": mods is 1 + bits (shift 1, alt 2, ctrl 4, super 8, hyper 16,
+// meta 32, caps lock 64, num lock 128); event is Kitty's 1 press, 2 repeat, 3 release.
+function decodeMods(field = '') {
+  const [param, eventType] = String(field).split(':');
   const bits = Math.max(0, (Number(param) || 1) - 1);
-  return { shift: !!(bits & 1), alt: !!(bits & 2), ctrl: !!(bits & 4), meta: !!(bits & 40) };
+  return {
+    shift: !!(bits & 1), alt: !!(bits & 2), ctrl: !!(bits & 4), meta: !!(bits & 40),
+    repeat: eventType === '2', release: eventType === '3',
+  };
 }
 
 // One character typed without an escape sequence (C0 controls, DEL, printable).
@@ -57,6 +62,7 @@ function charKey(ch, alt = false) {
 
 function sgrMouse(params, final) {
   const [b, col, row] = params.slice(1).split(';').map(Number);
+  if (b & 128) return null; // extra buttons (back/forward): not forwarded
   const mods = { shift: !!(b & 4), alt: !!(b & 8), ctrl: !!(b & 16) };
   const low = b & 3;
   if (b & 64) {
@@ -74,20 +80,26 @@ function sgrMouse(params, final) {
 function kittyKey(params) {
   const [codes = '', modField = '', textField = ''] = params.split(';');
   const [code, shiftedCode] = codes.split(':').map((s) => (s === '' ? undefined : Number(s)));
-  const [modParam, eventType] = modField.split(':');
-  if (eventType === '3') return null; // key release
-  const mods = decodeMods(modParam);
-  const repeat = eventType === '2';
+  const mods = decodeMods(modField);
+  if (mods.release) return null;
   let key = KITTY_KEYS[code];
+  let text;
   if (key === undefined) {
     if (!(code >= 32) || (code >= 57344 && code <= 63743)) return null; // other functional / private-use keys
-    key = String.fromCodePoint(mods.shift && shiftedCode ? shiftedCode : code);
-    if (mods.shift && !shiftedCode) key = key.toUpperCase();
+    // Associated text (flag 16) already reflects shift and caps lock; then the shifted alternate
+    // key (flag 4); then the base key, uppercased for shift.
+    const assoc = textField ? String.fromCodePoint(...textField.split(':').map(Number)) : '';
+    if (assoc && [...assoc].length === 1 && assoc.codePointAt(0) >= 32) key = assoc;
+    else if (mods.shift && shiftedCode) key = String.fromCodePoint(shiftedCode);
+    else {
+      key = String.fromCodePoint(code);
+      if (mods.shift) key = key.toUpperCase();
+    }
+    text = assoc || key;
+  } else if ([...key].length === 1) {
+    text = key; // keypad digits and operators; named keys (Enter, ArrowLeft…) have no text
   }
-  let text;
-  if (textField) text = String.fromCodePoint(...textField.split(':').map(Number));
-  else if ([...key].length === 1) text = key; // named keys (Enter, ArrowLeft…) have no text
-  return keyEvent(key, { ...mods, repeat, text });
+  return keyEvent(key, { ...mods, text });
 }
 
 function csiEvent(params, final, raw) {
@@ -99,9 +111,13 @@ function csiEvent(params, final, raw) {
   const fields = params.split(';');
   if (final === '~') {
     const key = TILDE_KEYS[fields[0]];
-    return key ? keyEvent(key, decodeMods(fields[1])) : null;
+    const mods = decodeMods(fields[1]);
+    return key && !mods.release ? keyEvent(key, mods) : null;
   }
-  if (FINAL_KEYS[final]) return keyEvent(FINAL_KEYS[final], decodeMods(fields[1]));
+  if (FINAL_KEYS[final]) {
+    const mods = decodeMods(fields[1]);
+    return mods.release ? null : keyEvent(FINAL_KEYS[final], mods);
+  }
   if (final === 'Z') return keyEvent('Tab', { shift: true });
   return null; // focus events and anything else we don't use
 }
