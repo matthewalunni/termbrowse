@@ -135,3 +135,87 @@ test('chrome that exits before opening its port rejects at once with the exit co
   );
   assert.ok(Date.now() - t0 < 2000, `took ${Date.now() - t0} ms`);
 });
+
+// --- launch flags and ensureChrome offline/concurrency paths (no real Chrome, no network) ---
+test('chromeArgs adds the Puppeteer anti-throttling defaults, nothing that changes logins', async () => {
+  const { chromeArgs } = await import('../src/chrome.js');
+  const base = { port: 9333, profileDir: '/p', headless: false, windowSize: [1280, 800], extraArgs: ['--x'], url: 'about:blank' };
+  for (const platform of ['darwin', 'linux']) {
+    const args = chromeArgs({ ...base, platform });
+    for (const f of [
+      '--disable-background-timer-throttling',
+      '--disable-backgrounding-occluded-windows',
+      '--disable-renderer-backgrounding',
+      '--disable-popup-blocking',
+      '--disable-hang-monitor',
+      '--disable-ipc-flooding-protection',
+      '--disable-features=Translate',
+    ]) assert.ok(args.includes(f), `${platform}: ${f}`);
+    for (const f of ['--enable-automation', '--disable-extensions', '--mute-audio', '--headless=new', '--use-mock-keychain']) {
+      assert.ok(!args.includes(f), `${platform}: unexpected ${f}`);
+    }
+    assert.equal(args.at(-1), 'about:blank');
+    assert.equal(args.at(-2), '--x', 'extra args come after ours, so they can override');
+    assert.equal(args.includes('--disable-dev-shm-usage'), platform === 'linux');
+    assert.equal(args.includes('--password-store=basic'), platform === 'linux');
+  }
+  assert.ok(chromeArgs({ ...base, headless: true, platform: 'darwin' }).includes('--headless=new'));
+});
+
+async function cachePaths() {
+  const home = await mkdtemp(join(tmp, 'home-'));
+  return paths({ HOME: home });
+}
+const cfgStable = { chrome: { channel: 'stable' } };
+const { Browser, computeExecutablePath, detectBrowserPlatform } = await import('@puppeteer/browsers');
+async function fakeInstalled(p, buildId) {
+  const executablePath = computeExecutablePath({ cacheDir: join(p.cache, 'browsers'), browser: Browser.CHROME, buildId, platform: detectBrowserPlatform() });
+  const { mkdir: mk } = await import('node:fs/promises');
+  await mk(join(executablePath, '..'), { recursive: true });
+  await writeFile(executablePath, '#!/bin/sh\n');
+  await chmod(executablePath, 0o755);
+  return executablePath;
+}
+
+test('ensureChrome falls back to the newest installed build when the lookup fails or hangs', async () => {
+  const p = await cachePaths();
+  await fakeInstalled(p, '9.0.1.2');
+  const newest = await fakeInstalled(p, '10.0.0.1');
+  const installer = () => { throw new Error('must not install'); };
+  const failing = () => Promise.reject(new Error('offline'));
+  assert.deepEqual(await ensureChrome(cfgStable, p, { resolve: failing, installer }), { executablePath: newest, buildId: '10.0.0.1' });
+  const hanging = () => new Promise(() => {});
+  const t0 = Date.now();
+  assert.equal((await ensureChrome(cfgStable, p, { resolve: hanging, installer, resolveTimeoutMs: 100 })).buildId, '10.0.0.1');
+  assert.ok(Date.now() - t0 < 2000);
+});
+
+test('ensureChrome with no lookup and nothing installed fails clearly', async () => {
+  const p = await cachePaths();
+  await assert.rejects(
+    ensureChrome(cfgStable, p, { resolve: () => Promise.reject(new Error('offline')), installer: () => { throw new Error('no'); } }),
+    /could not look up the current Chrome for Testing build \(offline\) and none is installed/,
+  );
+});
+
+test('two concurrent ensureChrome calls install once', async () => {
+  const p = await cachePaths();
+  let installs = 0;
+  const installer = async ({ buildId }) => {
+    installs++;
+    await new Promise((r) => setTimeout(r, 200));
+    return { executablePath: await fakeInstalled(p, buildId) };
+  };
+  const resolve = async () => '11.0.0.0';
+  const saved = process.stderr.write;
+  process.stderr.write = () => true; // the download notice
+  let got;
+  try {
+    got = await Promise.all([ensureChrome(cfgStable, p, { resolve, installer }), ensureChrome(cfgStable, p, { resolve, installer })]);
+  } finally {
+    process.stderr.write = saved;
+  }
+  assert.equal(installs, 1);
+  assert.equal(got[0].executablePath, got[1].executablePath);
+  await access(got[0].executablePath, constants.X_OK);
+});
