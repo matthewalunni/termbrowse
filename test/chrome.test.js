@@ -87,7 +87,7 @@ test('failed start rejects and kills the child', async () => {
   const pidfile = join(tmp, 'fail.pid');
   const exe = await fakeChrome('fail-chrome', `echo $$ > "${pidfile}"\nexec sleep 60`);
   await assert.rejects(
-    launchChrome({ executablePath: exe, profileDir: join(tmp, 'pf'), headless: true, windowSize: [1, 1], extraArgs: [], startTimeoutMs: 400 }),
+    launchChrome({ executablePath: exe, profileDir: join(tmp, 'pf'), headless: true, windowSize: [1, 1], extraArgs: [], startTimeoutMs: 1500 }),
     /did not open/,
   );
   const pid = Number((await readFile(pidfile, 'utf8')).trim());

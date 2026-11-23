@@ -358,6 +358,10 @@ test('login: closing the last page finishes too', { skip, timeout: 60_000 }, asy
   const l = await startLogin(0);
   assert.ok(await until(() => l.out().includes('press Enter'), 30_000));
   const { port } = l;
+  // As a person would: the window has been up a moment, so login has seen its page (it treats
+  // "no pages" as closed only after one was seen; a starting Chrome may list none).
+  assert.ok(await until(async () => (await listTargets(port)).some((x) => x.type === 'page'), 10_000));
+  await sleep(1200);
   for (const t of (await listTargets(port)).filter((x) => x.type === 'page')) {
     await fetch(`http://127.0.0.1:${port}/json/close/${t.id}`);
   }
