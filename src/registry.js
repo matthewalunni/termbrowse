@@ -1,5 +1,8 @@
 import fs from 'node:fs/promises';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
 import { paths, ensureStateDir } from './paths.js';
+import { browserVersion } from './cdp.js';
 
 const LOCK_RETRY_MS = 20;
 const LOCK_TIMEOUT_MS = 2000;
@@ -44,13 +47,13 @@ async function save(list, p) {
   await fs.rename(tmp, p.registry);
 }
 
-async function withLock(p, fn) {
+export async function withLock(p, fn) {
   await ensureStateDir(p);
   const lock = `${p.registry}.lock`;
   const deadline = Date.now() + LOCK_TIMEOUT_MS;
   for (;;) {
     try {
-      (await fs.open(lock, 'wx')).close();
+      await (await fs.open(lock, 'wx')).close();
       break;
     } catch (e) {
       if (e.code !== 'EEXIST') throw e;
@@ -97,11 +100,43 @@ export async function killGroup(pid) {
   if (alive(pid)) signal('SIGKILL');
 }
 
+// When a process started, from ps (local time, to the second); null if it can't be told.
+async function startTime(pid) {
+  try {
+    const { stdout } = await promisify(execFile)('ps', ['-o', 'lstart=', '-p', String(pid)], { env: { ...process.env, LC_ALL: 'C' } });
+    const t = Date.parse(stdout.trim());
+    return Number.isNaN(t) ? null : t;
+  } catch {
+    return null;
+  }
+}
+
+// Whether the entry's pid still names the Chrome it recorded, not a process that reused the
+// pid: its port still answers, or the process started no later than the entry was written.
+export async function sameChrome(e) {
+  if (await browserVersion(e.port)) return true;
+  const recorded = Date.parse(e.startedAt ?? '');
+  if (Number.isNaN(recorded)) return false;
+  const started = await startTime(e.pid);
+  return started !== null && started <= recorded;
+}
+
+// Kills the entry's Chrome (killGroup) if it can be confirmed to be it; else logs one line.
+export async function killEntry(e, stderr = process.stderr) {
+  if (!(await sameChrome(e))) {
+    stderr.write(`termbrowse: not killing pid ${e.pid} (${e.agentId}): could not confirm it is still that Chrome\n`);
+    return false;
+  }
+  await killGroup(e.pid);
+  return true;
+}
+
 export async function readRegistry(p = paths()) {
   const { list, corrupt } = await load(p);
   const orphans = list.filter(orphaned);
   // Killed outside the lock: the grace period could outlast the lock timeout of other callers.
-  await Promise.all(orphans.map((e) => killGroup(e.pid)));
+  // An orphan whose pid can't be confirmed is dropped without a kill.
+  await Promise.all(orphans.map((e) => killEntry(e)));
   const swept = new Set(orphans.map((e) => e.pid));
   const keep = (e) => alive(e.pid) && !swept.has(e.pid);
   const live = list.filter(keep);

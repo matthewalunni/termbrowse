@@ -157,8 +157,9 @@ test('agents lists live entries with their first page URL, - when unreachable', 
 test('stop --agent kills that Chrome and removes its entry; --all stops the rest', async () => {
   const a = fakeChrome();
   const b = fakeChrome();
-  await upsertEntry({ agentId: 'one', pid: a.pid, port: 1, profileDir: '/x', kind: 'agent' }, p);
-  await upsertEntry({ agentId: 'two', pid: b.pid, port: 2, profileDir: '/y', kind: 'agent' }, p);
+  const startedAt = new Date(Date.now() + 1000).toISOString(); // recorded after the process started
+  await upsertEntry({ agentId: 'one', pid: a.pid, port: 1, profileDir: '/x', kind: 'agent', startedAt }, p);
+  await upsertEntry({ agentId: 'two', pid: b.pid, port: 2, profileDir: '/y', kind: 'agent', startedAt }, p);
 
   let r = await run(['stop', '--agent', 'one']);
   assert.equal(r.code, 0);
@@ -178,6 +179,16 @@ test('stop --agent kills that Chrome and removes its entry; --all stops the rest
   r = await run(['stop', '--all']);
   assert.equal(r.code, 0);
   assert.match(r.stdout, /nothing to stop/);
+});
+
+test('stop does not kill a pid it cannot confirm is still that Chrome', async () => {
+  const a = fakeChrome(); // started after the entry says its Chrome did, and the port is dead
+  await upsertEntry({ agentId: 'reused', pid: a.pid, port: 1, profileDir: '/x', kind: 'agent', startedAt: new Date(Date.now() - 3600_000).toISOString() }, p);
+  const r = await run(['stop', '--agent', 'reused']);
+  await sleep(300);
+  assert.equal(alive(a.pid) && a.exitCode === null, true, 'unrelated process was killed');
+  assert.match(r.stderr, new RegExp(`not killing pid ${a.pid}`));
+  assert.equal(await (await import('../src/registry.js')).findEntry('reused', p), null, 'entry kept');
 });
 
 test('stop needs exactly one of --agent and --all', async () => {

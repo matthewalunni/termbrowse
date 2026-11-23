@@ -4,7 +4,7 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { paths } from '../src/paths.js';
-import { readRegistry, upsertEntry, removeEntry, findEntry } from '../src/registry.js';
+import { readRegistry, upsertEntry, removeEntry, findEntry, withLock } from '../src/registry.js';
 
 async function tmpPaths() {
   const home = await fs.mkdtemp(path.join(os.tmpdir(), 'tb-reg-'));
@@ -142,4 +142,39 @@ test('the state dir is created private (0700)', async () => {
   const p = paths({ HOME: home });
   await upsertEntry(entry('a'), p);
   assert.equal((await fs.stat(p.state)).mode & 0o777, 0o700);
+});
+
+test('the lock is released when the work under it throws', async () => {
+  const p = await tmpPaths();
+  await assert.rejects(withLock(p, async () => { throw new Error('boom'); }), /boom/);
+  await assert.rejects(fs.stat(p.registry + '.lock'), 'lock left behind');
+  await upsertEntry(entry('after'), p);
+  assert.deepEqual((await readRegistry(p)).map((e) => e.agentId), ['after']);
+});
+
+test('an orphaned entry whose pid now names an unrelated, later process is dropped but not killed', async () => {
+  const { spawn } = await import('node:child_process');
+  const p = await tmpPaths();
+  const gone = spawn('/bin/sh', ['-c', 'exit 0']);
+  await new Promise((r) => gone.once('exit', r));
+  // The pid was reused: this sleeper started after the entry was recorded, and the port is dead.
+  const sleeper = spawn('sleep', ['60'], { detached: true, stdio: 'ignore' });
+  const alive = (pid) => { try { process.kill(pid, 0); return true; } catch { return false; } };
+  const saved = process.stderr.write;
+  let err = '';
+  process.stderr.write = (s) => { err += s; return true; };
+  try {
+    const startedAt = new Date(Date.now() - 3600_000).toISOString();
+    await upsertEntry(entry('reused', { pid: sleeper.pid, port: 1, startedAt, wrapperPid: gone.pid }), p);
+    const got = await readRegistry(p);
+    process.stderr.write = saved;
+    assert.deepEqual(got, []);
+    await new Promise((r) => setTimeout(r, 300));
+    assert.equal(alive(sleeper.pid), true, 'unrelated process was killed');
+    assert.equal(err.trim().split('\n').length, 1, err);
+    assert.match(err, new RegExp(`not killing pid ${sleeper.pid}`));
+  } finally {
+    process.stderr.write = saved;
+    sleeper.kill('SIGKILL');
+  }
 });

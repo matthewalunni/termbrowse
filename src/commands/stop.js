@@ -1,6 +1,6 @@
 // `termbrowse stop (--agent ID | --all)`: close Chromes termbrowse started.
 import { paths } from '../paths.js';
-import { readRegistry, removeEntry, killGroup } from '../registry.js';
+import { readRegistry, removeEntry, killEntry } from '../registry.js';
 import { UsageError, parse } from './usage.js';
 
 export async function runStop(args, { stdout = process.stdout, stderr = process.stderr, env = process.env } = {}) {
@@ -20,9 +20,9 @@ export async function runStop(args, { stdout = process.stdout, stderr = process.
   }
   await Promise.all(
     targets.map(async (e) => {
-      await killGroup(e.pid);
+      const killed = await killEntry(e, stderr);
       await removeEntry(e.agentId, p);
-      stdout.write(`stopped ${e.agentId} (pid ${e.pid}, port ${e.port})\n`);
+      if (killed) stdout.write(`stopped ${e.agentId} (pid ${e.pid}, port ${e.port})\n`);
     }),
   );
   return 0;
