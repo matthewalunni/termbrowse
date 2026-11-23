@@ -58,6 +58,25 @@ function parse(line) {
 
 const isToolsCall = (msg) => (Array.isArray(msg) ? msg : [msg]).some((m) => m?.method === 'tools/call');
 
+// chrome-devtools-mcp's new_page defaults to background: false, which brings the tab to the
+// front and activates Chrome (a window manager then jumps to its workspace). When the agent
+// leaves `background` unset, set it to true. Only the modified line is re-serialized; anything
+// unparsable or untouched is returned as it came.
+export function backgroundNewPages(line) {
+  const msg = parse(line);
+  if (msg === undefined || msg === null) return line;
+  let changed = false;
+  for (const m of Array.isArray(msg) ? msg : [msg]) {
+    if (m?.method !== 'tools/call' || m.params?.name !== 'new_page') continue;
+    const args = m.params.arguments ?? {};
+    if (typeof args !== 'object' || Array.isArray(args) || args.background !== undefined) continue;
+    m.params.arguments = { ...args, background: true };
+    changed = true;
+  }
+  if (!changed) return line;
+  return `${JSON.stringify(msg)}${line.endsWith('\n') ? '\n' : ''}`;
+}
+
 export async function runMcp(
   extraArgs = [],
   {
@@ -80,6 +99,8 @@ export async function runMcp(
   const port = existing?.port ?? (await freePort());
   let chrome = null; // the Chrome this wrapper launched, while it is alive
   const headless = effectiveHeadless(cfg, env);
+  // Same condition as the background launch (see launchPlan in chrome.js).
+  const backgroundTabs = cfg.chrome.background && !headless && process.platform === 'darwin';
 
   async function announce(c) {
     if (!cfg.hooks.onLaunch) return;
@@ -176,7 +197,7 @@ export async function runMcp(
           // A batch goes through anyway; chrome-devtools-mcp reports the missing browser per call.
         }
       }
-      child.stdin.write(line);
+      child.stdin.write(backgroundTabs && msg !== undefined ? backgroundNewPages(line) : line);
     }
   }
   function pump() {

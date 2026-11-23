@@ -293,3 +293,33 @@ setInterval(() => {}, 1000);
   assert.ok(Date.now() - t0 >= 300, 'did not wait for SIGTERM first');
   assert.equal(alive(pid), false);
 });
+
+test('backgroundNewPages: new_page without background gets background: true', async () => {
+  const { backgroundNewPages } = await import('../src/mcp.js');
+  const call = (name, args) => `${JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name, arguments: args } })}\n`;
+  const out = JSON.parse(backgroundNewPages(call('new_page', { url: 'https://example.com' })));
+  assert.deepEqual(out.params.arguments, { url: 'https://example.com', background: true });
+  assert.ok(backgroundNewPages(call('new_page', { url: 'x' })).endsWith('\n'));
+  assert.equal(JSON.parse(backgroundNewPages(`${JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'new_page' } })}\n`)).params.arguments.background, true);
+  // explicit values are kept, other tools and messages are byte-identical
+  for (const line of [
+    call('new_page', { url: 'x', background: false }),
+    call('new_page', { url: 'x', background: true }),
+    call('navigate_page', { url: 'x' }),
+    call('select_page', { pageId: 1 }),
+    `${JSON.stringify({ jsonrpc: '2.0', id: 2, method: 'tools/list' })}\n`,
+    '{ "jsonrpc": "2.0",  "method":"notifications/initialized" }\n',
+    'not json\n',
+    '\n',
+    'null\n',
+  ]) {
+    assert.equal(backgroundNewPages(line), line);
+  }
+  // a batch: only the new_page entry changes
+  const batch = JSON.parse(backgroundNewPages(`${JSON.stringify([
+    { jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'new_page', arguments: {} } },
+    { jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'list_pages', arguments: {} } },
+  ])}\n`));
+  assert.equal(batch[0].params.arguments.background, true);
+  assert.deepEqual(batch[1].params.arguments, {});
+});
