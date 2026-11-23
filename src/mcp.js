@@ -100,6 +100,7 @@ export async function runMcp(
     const c = await launchChrome({
       profileDir,
       headless,
+      background: cfg.chrome.background,
       windowSize: cfg.chrome.windowSize,
       extraArgs: cfg.chrome.extraArgs,
       port,

@@ -130,7 +130,7 @@ termbrowse then prints `Saving your sign-ins…` and keeps Chrome running for 35
 - New agent profiles and every `termbrowse <url>` run start from a copy of this profile. Agents that already have a profile keep their own sign-ins and don't pick up new ones. To give an existing agent the new sign-ins, delete its folder under `~/.local/state/termbrowse/profiles/`.
 - `--reset` deletes the starter profile first.
 - Login needs a display. On Linux without `DISPLAY` or `WAYLAND_DISPLAY` it exits 1. Sign in on a machine with a screen instead.
-- On macOS, Chrome encrypts cookies with a key in your login Keychain. A copied profile still reads them: in a manual check, a profile copied from the starter returned the starter's cookies (`tbcheck=1`, `tbjs=1`).
+- On macOS, termbrowse starts every Chrome with a mock keychain (`--use-mock-keychain`), so it never prompts for Keychain access. Its saved logins live only in termbrowse's own profiles, not in your Keychain, and every termbrowse profile uses the same cookie key, so a profile copied from the starter still reads the starter's cookies. A starter profile signed in before termbrowse used the mock keychain may lose those sign-ins (its cookies were encrypted with the Keychain key): if so, run `termbrowse login --reset` and sign in again.
 
 ## Configuration
 
@@ -140,6 +140,7 @@ termbrowse reads `$TERMBROWSE_CONFIG` or, if that is unset, `$XDG_CONFIG_HOME/te
 [chrome]
 channel = "stable"          # Chrome for Testing channel: stable, beta, dev, canary
 headless = false            # forced true on Linux with no DISPLAY / WAYLAND_DISPLAY
+background = true           # macOS: open agent and `termbrowse <url>` windows without taking focus
 window_size = "1280x800"    # agent and standalone window size, "WIDTHxHEIGHT"
 extra_args = []             # extra Chrome flags, e.g. ["--lang=en-US"]
 
@@ -153,6 +154,8 @@ on_launch = ""              # shell command run after a termbrowse Chrome starts
 fill_pane = true             # pages opened with `termbrowse <url>` (and `view --port` on such a browser) fill the pane
 fill_pane_for_agents = false # agent browsers fill the pane too (`view --agent`, `view --port` on an agent's port)
 ```
+
+On macOS, agent windows and `termbrowse <url>` windows open in the background, so they don't steal focus from your terminal (or pull a window manager that follows focus onto their workspace). Set `background = false` to have them come to the front as they open. `termbrowse login` always comes to the front, since you type into it.
 
 `on_launch` runs with `sh -c` once the new Chrome has a page. Its environment has these variables:
 

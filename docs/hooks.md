@@ -18,6 +18,8 @@ Rules:
 - A hook still running after **10 seconds is killed** along with its child processes. For anything longer, detach it: `nohup my-script >/dev/null 2>&1 &` or `setsid my-script &`.
 - Headless Chromes have no window. That includes Linux with no display, and `headless = true`. The recipes below then find nothing and do nothing. To skip them cleanly, start the hook with `[ "$TERMBROWSE_HEADLESS" = 1 ] && exit 0`.
 
+- On macOS, agent and `termbrowse <url>` windows open in the background (`[chrome] background = true`, the default), so they don't steal focus or drag a focus-following window manager to their workspace. A hook can move them without you being pulled along. Set `background = false` to turn this off.
+
 A window may appear a moment after the page exists, so each recipe polls for up to about 3 seconds.
 
 ## AeroSpace (macOS)

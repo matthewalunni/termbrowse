@@ -8,7 +8,7 @@ import {
 } from '@puppeteer/browsers';
 import { paths } from './paths.js';
 import { loadConfig, effectiveHeadless } from './config.js';
-import { waitForPort } from './cdp.js';
+import { browserVersion, CdpSession, waitForPort } from './cdp.js';
 import { alive } from './registry.js';
 
 export function bundleId(platform = process.platform) {
@@ -184,7 +184,8 @@ export function freePort() {
 // Puppeteer's defaults that keep a page running at full speed when its window is hidden or
 // covered (a viewer watches it through a screencast, not the window), and that let popups open.
 // Left out on purpose: --enable-automation (infobar, sign-in blocks), --disable-extensions,
-// --mute-audio, --use-mock-keychain and anything else that would change logins.
+// --mute-audio and anything else that would change logins. --use-mock-keychain (macOS) is added
+// separately in chromeArgs.
 const DEFAULT_FLAGS = [
   '--disable-background-timer-throttling',
   '--disable-backgrounding-occluded-windows',
@@ -195,7 +196,8 @@ const DEFAULT_FLAGS = [
   '--disable-features=Translate',
 ];
 
-export function chromeArgs({ port, profileDir, headless, windowSize, extraArgs, url, platform = process.platform }) {
+// url null: no positional url (with --no-startup-window, Chrome then opens no window at all).
+export function chromeArgs({ port, profileDir, headless, windowSize, extraArgs, url, noStartupWindow = false, platform = process.platform }) {
   const args = [
     `--remote-debugging-port=${port}`,
     '--remote-debugging-address=127.0.0.1',
@@ -207,29 +209,59 @@ export function chromeArgs({ port, profileDir, headless, windowSize, extraArgs, 
   ];
   if (headless) args.push('--headless=new');
   if (platform === 'linux') args.push('--password-store=basic', '--disable-dev-shm-usage');
-  args.push(...extraArgs, url);
+  // Every macOS launch (agents, browse, login, tests) uses the mock keychain, so Chrome never
+  // shows a Keychain prompt and all termbrowse profiles share one cookie key: an agent profile
+  // copied from the starter can still decrypt the starter's cookies.
+  if (platform === 'darwin') args.push('--use-mock-keychain');
+  if (noStartupWindow) args.push('--no-startup-window');
+  args.push(...extraArgs);
+  if (url != null) args.push(url);
   return args;
+}
+
+// A windowed Chrome on macOS activates itself when it opens its first window, which pulls focus
+// (and a window manager that follows it) away from the terminal. In the background, Chrome starts
+// with no window and the first page is created afterwards over CDP with background: true, which
+// opens the window without activating the app. Headless and Linux launches are unchanged.
+export function launchPlan({ background = false, ...opts }) {
+  const platform = opts.platform ?? process.platform;
+  if (!(background && !opts.headless && platform === 'darwin')) return { args: chromeArgs(opts), createTarget: null };
+  return { args: chromeArgs({ ...opts, url: null, noStartupWindow: true }), createTarget: { url: opts.url } };
+}
+
+async function createFirstPage(port, url) {
+  const version = await browserVersion(port);
+  if (!version?.webSocketDebuggerUrl) throw new Error('no browser websocket on the debugging port');
+  const session = await CdpSession.connect(version.webSocketDebuggerUrl);
+  try {
+    await session.send('Target.createTarget', { url, newWindow: true, background: true });
+  } finally {
+    session.close();
+  }
 }
 
 export async function launchChrome({
   profileDir,
   url = 'about:blank',
   headless,
+  background,
   windowSize,
   extraArgs,
   port,
   executablePath,
+  platform = process.platform,
   startTimeoutMs = 15000,
   killGraceMs = 3000,
 }) {
   const cfg = await loadConfig();
   headless ??= effectiveHeadless(cfg);
+  background ??= cfg.chrome.background;
   windowSize ??= cfg.chrome.windowSize;
   extraArgs ??= cfg.chrome.extraArgs;
   executablePath ??= (await ensureChrome(cfg)).executablePath;
   port ??= await freePort();
 
-  const args = chromeArgs({ port, profileDir, headless, windowSize, extraArgs, url });
+  const { args, createTarget } = launchPlan({ port, profileDir, headless, background, windowSize, extraArgs, url, platform });
 
   const { logs } = paths();
   await mkdir(logs, { recursive: true, mode: 0o700 });
@@ -277,6 +309,14 @@ export async function launchChrome({
     throw err;
   } finally {
     stopWaiting.abort(); // stop polling once the race is decided
+  }
+  if (createTarget) {
+    try {
+      await Promise.race([spawnFailed, exitedEarly, withTimeout(createFirstPage(port, createTarget.url), startTimeoutMs)]);
+    } catch (err) {
+      await kill();
+      throw new Error(`Chrome could not create its first page: ${err.message}; see ${tmpLog}`);
+    }
   }
   await rename(tmpLog, join(logs, `chrome-${child.pid}.log`)).catch(() => {});
   return { pid: child.pid, port, child, kill };

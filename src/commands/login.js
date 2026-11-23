@@ -59,6 +59,7 @@ export async function runLogin(
     profileDir: p.starter,
     url: positionals[0] ? normalizeUrl(positionals[0]) : 'about:blank',
     headless: false,
+    background: false, // the user types into this window, so it should come to the front
     windowSize: cfg.chrome.windowSize,
     extraArgs: cfg.chrome.extraArgs,
     ...chromeOptions,

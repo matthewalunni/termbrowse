@@ -76,6 +76,7 @@ export async function runBrowse(
         profileDir,
         url,
         headless,
+        background: cfg.chrome.background,
         windowSize: cfg.chrome.windowSize,
         extraArgs: cfg.chrome.extraArgs,
         executablePath,

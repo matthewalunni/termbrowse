@@ -69,3 +69,11 @@ test('non-boolean fill values name the file and the key', async () => {
     await assert.rejects(loadConfig({ TERMBROWSE_CONFIG: file }), (err) => err.message.includes(file) && err.message.includes(key));
   }
 });
+
+test('[chrome] background: default true, false honoured, non-boolean names the file', async () => {
+  assert.equal((await loadConfig({ TERMBROWSE_CONFIG: '/nonexistent.toml' })).chrome.background, true);
+  const off = await tmpFile('[chrome]\nbackground = false\n');
+  assert.equal((await loadConfig({ TERMBROWSE_CONFIG: off })).chrome.background, false);
+  const bad = await tmpFile('[chrome]\nbackground = "no"\n');
+  await assert.rejects(loadConfig({ TERMBROWSE_CONFIG: bad }), (e) => e.message.includes(bad) && /background/.test(e.message));
+});

@@ -34,6 +34,7 @@ export async function loadConfig(env = process.env) {
     chrome: {
       channel: chrome.channel ?? 'stable',
       headless: chrome.headless ?? false,
+      background: parseBool(chrome.background ?? true, 'background', file),
       windowSize: parseSize(chrome.window_size ?? '1280x800', file),
       extraArgs: chrome.extra_args ?? [],
     },

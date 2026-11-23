@@ -151,13 +151,14 @@ test('chromeArgs adds the Puppeteer anti-throttling defaults, nothing that chang
       '--disable-ipc-flooding-protection',
       '--disable-features=Translate',
     ]) assert.ok(args.includes(f), `${platform}: ${f}`);
-    for (const f of ['--enable-automation', '--disable-extensions', '--mute-audio', '--headless=new', '--use-mock-keychain']) {
+    for (const f of ['--enable-automation', '--disable-extensions', '--mute-audio', '--headless=new']) {
       assert.ok(!args.includes(f), `${platform}: unexpected ${f}`);
     }
     assert.equal(args.at(-1), 'about:blank');
     assert.equal(args.at(-2), '--x', 'extra args come after ours, so they can override');
     assert.equal(args.includes('--disable-dev-shm-usage'), platform === 'linux');
     assert.equal(args.includes('--password-store=basic'), platform === 'linux');
+    assert.equal(args.includes('--use-mock-keychain'), platform === 'darwin');
   }
   assert.ok(chromeArgs({ ...base, headless: true, platform: 'darwin' }).includes('--headless=new'));
 });
@@ -338,4 +339,74 @@ test('with nothing installed, a lookup that outlasts the long cap fails clearly'
     /could not look up the current Chrome for Testing build \(timed out after 300 ms\) and none is installed/,
   );
   assert.ok(Date.now() - t0 < 2000);
+});
+
+// --- background launch on macOS: no startup window, first page created in the background ---
+test('launchPlan: only a windowed darwin launch with background on skips the startup window', async () => {
+  const { launchPlan } = await import('../src/chrome.js');
+  const base = { port: 9333, profileDir: '/p', windowSize: [1280, 800], extraArgs: ['--x'], url: 'https://example.com/' };
+  for (const platform of ['darwin', 'linux']) {
+    for (const headless of [false, true]) {
+      for (const background of [false, true]) {
+        const label = `${platform} headless=${headless} background=${background}`;
+        const { args, createTarget } = launchPlan({ ...base, platform, headless, background });
+        assert.equal(args.includes('--use-mock-keychain'), platform === 'darwin', `${label}: mock keychain on every macOS launch`);
+        assert.equal(args.includes('--password-store=basic'), platform === 'linux', label);
+        if (platform === 'darwin' && !headless && background) {
+          assert.deepEqual(createTarget, { url: 'https://example.com/' }, label);
+          assert.ok(args.includes('--no-startup-window'), label);
+          assert.ok(!args.includes('https://example.com/'), `${label}: no positional url`);
+          assert.equal(args.at(-1), '--x', `${label}: extra args still come last`);
+        } else {
+          assert.equal(createTarget, null, label);
+          assert.ok(!args.includes('--no-startup-window'), label);
+          assert.equal(args.at(-1), 'https://example.com/', label);
+          assert.equal(args.at(-2), '--x', label);
+        }
+      }
+    }
+  }
+});
+
+test('a background launch resolves with its first page already created', { skip, timeout: 60_000 }, async () => {
+  // Takes the darwin windowed+background path on any platform, but --headless=new in extraArgs
+  // keeps the window from ever appearing.
+  const c = await launch({
+    profileDir: join(tmp, 'pbg'),
+    url: 'data:text/html,<title>bg</title>hi',
+    headless: false,
+    background: true,
+    platform: 'darwin',
+    extraArgs: ['--headless=new'],
+  });
+  const { execFileSync } = await import('node:child_process');
+  const cmd = execFileSync('ps', ['-o', 'command=', '-p', String(c.pid)], { encoding: 'utf8' });
+  assert.ok(cmd.includes('--no-startup-window'), cmd);
+  assert.ok(!cmd.includes('data:text/html'), 'the url is not a positional arg');
+  const pages = (await listTargets(c.port)).filter((t) => t.type === 'page');
+  assert.equal(pages.length, 1, JSON.stringify(pages));
+  assert.match(pages[0].url, /^data:text\/html/);
+});
+
+test('a background launch that cannot create its first page rejects and kills Chrome', async () => {
+  const pidfile = join(tmp, 'nows.pid');
+  // Answers /json/version without a browser websocket, so the first page cannot be created.
+  const exe = join(tmp, 'nows-chrome.mjs');
+  await writeFile(exe, `#!${process.execPath}
+import http from 'node:http';
+import { writeFileSync } from 'node:fs';
+writeFileSync(${JSON.stringify(pidfile)}, String(process.pid));
+const port = Number(process.argv.find((a) => a.startsWith('--remote-debugging-port=')).split('=')[1]);
+http.createServer((q, r) => r.end('{"Browser":"fake"}')).listen(port, '127.0.0.1');
+`);
+  await chmod(exe, 0o755);
+  await assert.rejects(
+    launchChrome({
+      executablePath: exe, profileDir: join(tmp, 'pn'), headless: false, background: true, platform: 'darwin',
+      windowSize: [1, 1], extraArgs: [], startTimeoutMs: 3000,
+    }),
+    /first page/,
+  );
+  const pid = Number((await readFile(pidfile, 'utf8')).trim());
+  assert.ok(await waitDead(pid), `pid ${pid} still alive`);
 });
