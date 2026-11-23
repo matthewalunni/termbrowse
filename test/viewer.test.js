@@ -213,12 +213,12 @@ test('when a followed popup closes, goes back to its opener', async () => {
   const targets = [
     { id: 'T1', type: 'page', url: 'https://example.com/', title: 'Example' },
     { id: 'T2', type: 'page', url: 'https://other.example/', title: 'Other' },
-    { id: 'T3', type: 'page', url: 'https://popup.example/', title: 'Popup' },
   ];
   fake = await startFakeCdpWith(targets);
   const t = fakeTerm();
   const { p } = start(t);
   await until(() => methods(fake, 'Target.setDiscoverTargets').length === 1 && methods(fake, 'Page.startScreencast').length === 1);
+  targets.push({ id: 'T3', type: 'page', url: 'https://popup.example/', title: 'Popup', webSocketDebuggerUrl: fake.wsUrl });
   fake.send({ method: 'Target.targetCreated', params: { targetInfo: { targetId: 'T3', type: 'page', openerId: 'T1', url: 'https://popup.example/' } } });
   await until(() => methods(fake, 'Page.startScreencast').length === 2);
   targets.push(targets.shift()); // opener no longer first, so only the opener rule picks it
@@ -250,13 +250,12 @@ test('pauses on bogus size, resumes on a sane one', async () => {
 });
 
 test('follows a popup opened by the current page', async () => {
-  fake = await startFakeCdpWith([
-    { id: 'T1', type: 'page', url: 'https://example.com/', title: 'Example' },
-    { id: 'T2', type: 'page', url: 'https://popup.example/', title: 'Popup' },
-  ]);
+  const targets = [{ id: 'T1', type: 'page', url: 'https://example.com/', title: 'Example' }];
+  fake = await startFakeCdpWith(targets);
   const t = fakeTerm();
   const { p } = start(t);
   await until(() => methods(fake, 'Target.setDiscoverTargets').length === 1 && methods(fake, 'Page.startScreencast').length === 1);
+  targets.push({ id: 'T2', type: 'page', url: 'https://popup.example/', title: 'Popup', webSocketDebuggerUrl: fake.wsUrl });
   fake.send({ method: 'Target.targetCreated', params: { targetInfo: { targetId: 'T9', type: 'service_worker', url: 'x' } } });
   fake.send({ method: 'Target.targetCreated', params: { targetInfo: { targetId: 'T2', type: 'page', openerId: 'T1', url: 'https://popup.example/' } } });
   await until(() => methods(fake, 'Page.startScreencast').length === 2);
@@ -266,13 +265,12 @@ test('follows a popup opened by the current page', async () => {
 });
 
 test('follows a new page that has no opener (chrome-devtools-mcp new_page)', async () => {
-  fake = await startFakeCdpWith([
-    { id: 'T1', type: 'page', url: 'https://example.com/', title: 'Example' },
-    { id: 'T2', type: 'page', url: 'https://new.example/', title: 'New' },
-  ]);
+  const targets = [{ id: 'T1', type: 'page', url: 'https://example.com/', title: 'Example' }];
+  fake = await startFakeCdpWith(targets);
   const t = fakeTerm();
   const { p } = start(t);
   await until(() => methods(fake, 'Target.setDiscoverTargets').length === 1 && methods(fake, 'Page.startScreencast').length === 1);
+  targets.push({ id: 'T2', type: 'page', url: 'https://new.example/', title: 'New', webSocketDebuggerUrl: fake.wsUrl });
   fake.send({ method: 'Target.targetCreated', params: { targetInfo: { targetId: 'T2', type: 'page', url: 'https://new.example/' } } });
   await until(() => methods(fake, 'Page.startScreencast').length === 2);
   await until(() => t.out().includes('https://new.example/'));

@@ -263,8 +263,8 @@ export async function runViewer({
   }
 
   // Follow every new tab (popups, and new_page from chrome-devtools-mcp, which has no opener):
-  // a second session on the browser endpoint reports new targets. Turning discovery on first
-  // reports the tabs that already exist; those are skipped.
+  // a second session on the browser endpoint reports new targets. Turning discovery on also
+  // reports the tabs that already exist, so the ones listed before it are skipped.
   (async () => {
     const wsUrl = (await browserVersion(port))?.webSocketDebuggerUrl;
     if (!wsUrl || closing) return;
@@ -274,17 +274,15 @@ export async function runViewer({
       return;
     }
     if (closing) { browser.close(); return; }
-    let discovering = true;
+    const existing = new Set((await listTargets(port).catch(() => [])).map((t) => t.id));
     browser.addEventListener('event', (e) => {
       const { method, params } = e.detail;
       const info = params?.targetInfo;
-      if (discovering || closing) return;
-      if (method === 'Target.targetCreated' && info?.type === 'page' && info.targetId !== target.id) {
-        switchTo(info.targetId, info.url);
-      }
+      if (closing || method !== 'Target.targetCreated' || info?.type !== 'page') return;
+      if (existing.has(info.targetId) || info.targetId === target.id) return;
+      switchTo(info.targetId, info.url);
     });
     await browser.send('Target.setDiscoverTargets', { discover: true }).catch(() => {});
-    discovering = false;
   })();
 
   onReady?.({ resize });
