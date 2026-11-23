@@ -8,6 +8,7 @@
 | `TERMBROWSE_PORT` | its debugging port on 127.0.0.1 |
 | `TERMBROWSE_AGENT` | the agent id; empty for `termbrowse <url>` |
 | `TERMBROWSE_KIND` | `agent` or `standalone` |
+| `TERMBROWSE_HEADLESS` | `1` if this Chrome is headless (no window), else `0` |
 | `TERMBROWSE_BUNDLE_ID` | `com.google.chrome.for.testing` on macOS, empty on Linux |
 
 Rules:
@@ -15,7 +16,7 @@ Rules:
 - The hook runs in the background. A slow hook doesn't hold up the agent or the viewer.
 - A hook that fails (non-zero exit, or can't start) is logged to `~/.local/state/termbrowse/logs/hook.log`. It never stops termbrowse.
 - A hook still running after **10 seconds is killed** along with its child processes. For anything longer, detach it: `nohup my-script >/dev/null 2>&1 &` or `setsid my-script &`.
-- Headless Chromes have no window. That includes Linux with no display, and `headless = true`. The recipes below then find nothing and do nothing. To skip them cleanly, check `TERMBROWSE_KIND` or your own config first.
+- Headless Chromes have no window. That includes Linux with no display, and `headless = true`. The recipes below then find nothing and do nothing. To skip them cleanly, start the hook with `[ "$TERMBROWSE_HEADLESS" = 1 ] && exit 0`.
 
 A window may appear a moment after the page exists, so each recipe polls for up to about 3 seconds.
 

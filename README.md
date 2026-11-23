@@ -2,7 +2,7 @@
 
 termbrowse draws a live Chrome tab inside your terminal with the Kitty graphics protocol. It also gives each AI coding agent its own Chrome for Testing through an MCP server, so you can watch any agent's browser in a pane next to it. It never touches your everyday Google Chrome or its profile. It downloads and uses Chrome for Testing, keeps one profile per agent, and lets you sign in once with `termbrowse login` so new agent profiles start signed in.
 
-![termbrowse in a terminal pane](docs/demo.gif)
+<!-- TODO: add a recording of the viewer in a pane (docs/demo.gif) and show it here. -->
 
 The viewer only shows the page. You can't click or type into it, so the page is driven by the agent (or by whatever else talks to its debugging port).
 
@@ -29,7 +29,7 @@ termbrowse example.com
 termbrowse localhost:3000        # localhost and 127.0.0.1 get http://
 ```
 
-This starts a Chrome for Testing of its own and draws the page in the terminal. Press `q` or Ctrl-C to quit, which closes that Chrome. The last row is a status line with the URL and frames per second, or `paused` (the pane is too small) or `disconnected` (Chrome went away). When the page opens a popup, the viewer switches to it, and when the popup closes it goes back to the page that opened it.
+This starts a Chrome for Testing of its own and draws the page in the terminal. In a terminal that can't draw Kitty graphics it says so and exits 2 before starting any Chrome. Press `q` or Ctrl-C to quit, which closes that Chrome. The last row is a status line with the URL and frames per second, or `paused` (the pane is too small) or `disconnected` (Chrome went away). When a new tab opens (a popup, or a page an agent opens with `new_page`), the viewer switches to it, and when that tab closes it goes back to the tab it was showing before.
 
 Each run uses a fresh copy of the starter profile (see `termbrowse login`), and that copy is deleted when you quit. Signing in during a `termbrowse <url>` session lasts only for that session. You can run several at once.
 
@@ -49,7 +49,9 @@ Quitting the viewer leaves that Chrome running. If the agent has no browser yet,
 
 `termbrowse mcp` is an MCP server (stdio). It runs [chrome-devtools-mcp](https://github.com/ChromeDevTools/chrome-devtools-mcp) (pinned to 1.13.0) against a Chrome for Testing that belongs to one agent. That Chrome starts on the agent's first browser tool call, not when the MCP server starts. The agent's tool list is available immediately.
 
-Which agent it is, in this order: `$TERMBROWSE_AGENT`, then `$HC_TERMINAL_ID` (Herdr's terminal id), then `pid-<parent pid>`. Each agent keeps its own profile across MCP restarts, so its sign-ins and cookies stay. A new agent's profile is copied from the starter profile.
+Which agent it is, in this order: `$TERMBROWSE_AGENT`, then `$HC_TERMINAL_ID` (Herdr's terminal id), then `pid-<parent pid>`. A new agent's profile is copied from the starter profile.
+
+An agent named by `TERMBROWSE_AGENT` or `HC_TERMINAL_ID` keeps its own profile across MCP restarts and sessions, so its sign-ins and cookies stay (until it is unused for `prune_days`). A `pid-<parent pid>` profile belongs to that one agent process: once the process has exited, the next termbrowse command deletes it. Outside Herdr, set `TERMBROWSE_AGENT` in the MCP server's environment to keep an agent's profile from one session to the next, e.g. `"env": { "TERMBROWSE_AGENT": "reviewer" }` in `.mcp.json`.
 
 Claude Code:
 
@@ -131,6 +133,7 @@ on_launch = ""              # shell command run after a termbrowse Chrome starts
 - `TERMBROWSE_PORT`: Chrome's debugging port.
 - `TERMBROWSE_AGENT`: the agent id. It is empty for `termbrowse <url>`.
 - `TERMBROWSE_KIND`: `agent` or `standalone`.
+- `TERMBROWSE_HEADLESS`: `1` if this Chrome is headless (no window), else `0`.
 - `TERMBROWSE_BUNDLE_ID`: `com.google.chrome.for.testing` on macOS, empty on Linux.
 
 The hook runs in the background, so it doesn't delay the agent or the viewer. A hook that fails is logged to `~/.local/state/termbrowse/logs/hook.log`, and it never stops termbrowse. A hook that runs longer than 10 seconds is killed along with its children, so start longer work with `nohup` or `setsid`. Window-manager recipes (AeroSpace, yabai, Hyprland) are in [docs/hooks.md](docs/hooks.md).
@@ -149,7 +152,7 @@ Other environment variables:
 
 The viewer needs the Kitty graphics protocol. Before drawing, termbrowse checks the terminal:
 
-1. It recognises Herdr (`HC_TERMINAL_ID`), Kitty (`KITTY_WINDOW_ID`, `TERM=xterm-kitty`), Ghostty (`TERM=xterm-ghostty`, `TERM_PROGRAM=ghostty`) and WezTerm (`TERM_PROGRAM=WezTerm`) from their environment variables.
+1. It recognises Herdr (`HC_TERMINAL_ID`), Kitty (`KITTY_WINDOW_ID`, `TERM=xterm-kitty`) and Ghostty (`TERM=xterm-ghostty`, `TERM_PROGRAM=ghostty`) from their environment variables.
 2. If it doesn't recognise the terminal, it sends the Kitty graphics query and waits for an answer.
 
 Herdr draws Kitty graphics but doesn't answer the query, which is why step 1 exists. If your terminal draws Kitty graphics but isn't recognised and doesn't answer, set `TERMBROWSE_ASSUME_KITTY=1`. In a terminal without Kitty graphics, the viewer prints a message and exits 2 without drawing anything.
@@ -158,7 +161,8 @@ Herdr draws Kitty graphics but doesn't answer the query, which is why step 1 exi
 | --- | --- |
 | Herdr (macOS) | tested (automated); not yet confirmed by eye on screen |
 | Herdr terminal on a remote Linux machine | the viewer runs and writes frames (31 fps measured on `dev`); not yet confirmed that the image shows up on the Mac |
-| Kitty, Ghostty, WezTerm | expected to work, not tested |
+| Kitty, Ghostty | expected to work, not tested |
+| WezTerm | Kitty graphics are off by default; with `enable_kitty_graphics = true` it answers the query (not tested) |
 | macOS Terminal.app, iTerm2 | not supported (no Kitty graphics); the viewer refuses to start |
 
 The image is drawn at the pane's real pixel size (1×, never Retina 2×) from PNG frames. Large frames lower the frame rate automatically.
@@ -166,10 +170,12 @@ The image is drawn at the pane's real pixel size (1×, never Retina 2×) from PN
 ## Herdr
 
 - In a Herdr terminal, the agent id is the terminal's id (`HC_TERMINAL_ID`, e.g. `t2p`). An agent running `termbrowse mcp` from that terminal gets a Chrome named after it, so `termbrowse agents` lists it as `t2p`.
-- To watch an agent's browser in a pane next to it, run this from the agent's pane (or add `--pane <id>`):
+- To watch an agent's browser in a pane next to it, split a pane. `pane.split` splits the focused pane unless you pass `--pane <id>`; this looks up the pane of the terminal it runs in (`HC_TERMINAL_ID`), so it splits the agent's own pane even when another pane has focus:
 
   ```sh
-  herdr-app do pane.split --direction right \
+  pane=$(herdr-app ls | jq -r --arg t "$HC_TERMINAL_ID" \
+    '[.spaces[].tabs[].terminals[] | select(.terminal == $t) | .pane][0] // empty')
+  herdr-app do pane.split --direction right ${pane:+--pane $pane} \
     --argv "[\"termbrowse\",\"view\",\"--agent\",\"$HC_TERMINAL_ID\"]"
   ```
 
@@ -196,10 +202,10 @@ termbrowse was checked on a headless Debian 13 (trixie) x86_64 machine (Herdr's 
 
 ## Security
 
-- Chrome for Testing is a real, current Chrome. termbrowse resolves the channel's current build each time it starts a Chrome and downloads it if needed, so you get new security fixes.
+- Chrome for Testing is a real, current Chrome. termbrowse looks up the channel's current build each time it starts a Chrome and downloads it if needed, so you get new security fixes. If that lookup fails or takes more than 3 seconds (offline), it uses the newest build already downloaded, which may be behind.
 - Every debugging port binds to `127.0.0.1` only. It is never reachable from the network.
 - A debugging port has no password. **Any program or user on the same machine can connect to it** and fully control that Chrome, including its signed-in sessions. Don't sign in to accounts you wouldn't let local processes use, and don't run termbrowse on a machine shared with people you don't trust.
-- Profiles (with cookies) live under `~/.local/state/termbrowse/`. Treat that folder like a password store.
+- Profiles (with cookies) live under `~/.local/state/termbrowse/`, which termbrowse keeps private to your user (mode 0700). Treat that folder like a password store.
 
 ## License
 
