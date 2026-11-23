@@ -135,7 +135,9 @@ test('draws frames', async () => {
   assert.equal(sc.params.maxHeight, 1443);
   assert.equal(sc.params.everyNthFrame, 1);
   assert.deepEqual(methods(fake, 'Page.screencastFrameAck').map((m) => m.params.sessionId), [1, 2, 3]);
-  assert.ok(methods(fake, 'Target.setDiscoverTargets').length === 1);
+  // Tab discovery starts on its own connection, independent of the frames: wait for it.
+  await until(() => methods(fake, 'Target.setDiscoverTargets').length >= 1);
+  assert.equal(methods(fake, 'Target.setDiscoverTargets').length, 1);
   assert.match(t.out(), new RegExp(`${ESC}\\[40;1H${ESC}\\[2Khttps://example.com/  \\d+ fps`));
   t.stdin.write('q');
   assert.equal(await p, 0);
