@@ -242,7 +242,7 @@ Two viewers on the same page (say `view --agent a1` in two panes) share one size
 
 ## Terminal support
 
-The viewer needs the Kitty graphics protocol. Ghostty, Kitty and Herdr work locally and over ssh (the graphics and your input travel through the ssh session as terminal bytes; Herdr in a remote terminal runs the viewer there). Before drawing, termbrowse checks the terminal:
+The viewer needs the Kitty graphics protocol. Before drawing, termbrowse checks the terminal:
 
 1. It recognises Herdr (`HC_TERMINAL_ID`), Kitty (`KITTY_WINDOW_ID`, `TERM=xterm-kitty`) and Ghostty (`TERM=xterm-ghostty`, `TERM_PROGRAM=ghostty`) from their environment variables.
 2. If it doesn't recognise the terminal, it sends the Kitty graphics query and waits for an answer.
@@ -251,9 +251,9 @@ Herdr draws Kitty graphics but doesn't answer the query, which is why step 1 exi
 
 | Terminal | Status |
 | --- | --- |
-| Herdr (macOS) | tested (automated); not yet confirmed by eye on screen |
-| Herdr terminal on a remote Linux machine | the viewer runs and writes frames (31 fps measured on `dev`); not yet confirmed that the image shows up on the Mac |
-| Kitty, Ghostty | expected to work, not tested |
+| Herdr (macOS) | watching confirmed by eye (2026-11-23): sharp, undistorted, follows new tabs, fills the pane, scrolls smoothly without flicker. Clicking and typing in the pane: expected to work; not yet confirmed |
+| Herdr terminal on a remote Linux machine | the viewer runs and writes frames (31 fps measured on `dev`); not yet confirmed that the image shows up on the Mac; clicking and typing over ssh: expected to work; not yet confirmed |
+| Kitty, Ghostty | expected to work; not yet confirmed (including clicking and typing) |
 | WezTerm | Kitty graphics are off by default; with `enable_kitty_graphics = true` it answers the query (not tested) |
 | macOS Terminal.app, iTerm2 | not supported (no Kitty graphics); the viewer refuses to start |
 
