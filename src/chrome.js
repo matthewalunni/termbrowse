@@ -1,6 +1,6 @@
 import { spawn } from 'node:child_process';
 import { createServer } from 'node:net';
-import { access, constants, mkdir, open, rename, stat, unlink } from 'node:fs/promises';
+import { access, constants, link, mkdir, open, readFile, rename, stat, unlink, utimes } from 'node:fs/promises';
 
 import { join } from 'node:path';
 import {
@@ -9,6 +9,7 @@ import {
 import { paths } from './paths.js';
 import { loadConfig, effectiveHeadless } from './config.js';
 import { waitForPort } from './cdp.js';
+import { alive } from './registry.js';
 
 export function bundleId(platform = process.platform) {
   return platform === 'darwin' ? 'com.google.chrome.for.testing' : '';
@@ -26,9 +27,12 @@ export async function findChrome(cfg, p = paths()) {
   return { platform, buildId, cacheDir, executablePath, installed };
 }
 
-const RESOLVE_TIMEOUT_MS = 3000;
-const INSTALL_LOCK_STALE_MS = 10 * 60_000; // a download that takes longer than this is presumed dead
+const RESOLVE_TIMEOUT_MS = 3000; // a build is installed: don't hold up a start for the network
+const FRESH_RESOLVE_TIMEOUT_MS = 60_000; // nothing installed: the lookup is the only way forward
+const INSTALL_LOCK_STALE_MS = 10 * 60_000; // backstop: a lock not refreshed for this long is dead
+const INSTALL_LOCK_REFRESH_MS = 30_000; // the holder touches the lock this often while it downloads
 const INSTALL_LOCK_RETRY_MS = 200;
+const WAITING_NOTICE = 'termbrowse: waiting for another termbrowse to finish downloading Chrome…\n';
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const isExecutable = (f) => access(f, constants.X_OK).then(() => true, () => false);
 
@@ -54,31 +58,76 @@ async function newestInstalled(cacheDir, platform) {
   return null;
 }
 
+const holderPid = (text) => (/^\d+$/.test(text.trim()) ? Number(text.trim()) : null);
+
+// Moves a stale lock out of the way. Renaming aside, then re-checking what was moved, keeps a
+// lock another waiter has just re-created (after taking over the same stale one) from being
+// deleted: such a lock is linked back unless a third process holds the name by then.
+async function breakLock(lock, sawPid) {
+  const aside = `${lock}.stale-${process.pid}-${Math.random().toString(36).slice(2)}`;
+  try {
+    await rename(lock, aside);
+  } catch {
+    return; // gone already
+  }
+  const moved = holderPid(await readFile(aside, 'utf8').catch(() => ''));
+  // Not the lock judged stale: a live holder's, or one so new its pid is not written yet.
+  if (moved !== sawPid && (moved === null || alive(moved))) await link(aside, lock).catch(() => {});
+  await unlink(aside).catch(() => {});
+}
+
 // Exclusive-create lock in the cache dir, so concurrent starts download a build only once.
-async function withInstallLock(cacheDir, fn, staleMs) {
+// The lock holds the holder's pid: a lock whose holder is dead (Ctrl-C, SIGKILL mid-download)
+// is taken over at once. The holder refreshes its mtime while it works, so the age rule only
+// catches a holder that is alive but stuck (or a lock with no readable pid).
+async function withInstallLock(cacheDir, fn, { staleMs, refreshMs, stderr }) {
   await mkdir(cacheDir, { recursive: true });
   const lock = join(cacheDir, 'install.lock');
+  let noticed = false;
   for (;;) {
+    let fh;
     try {
-      await (await open(lock, 'wx')).close();
-      break;
+      fh = await open(lock, 'wx');
     } catch (e) {
       if (e.code !== 'EEXIST') throw e;
+      const pid = holderPid(await readFile(lock, 'utf8').catch(() => ''));
       const st = await stat(lock).catch(() => null);
-      if (st && Date.now() - st.mtimeMs > staleMs) await unlink(lock).catch(() => {});
-      else await sleep(INSTALL_LOCK_RETRY_MS);
+      if (!st) continue; // released meanwhile
+      if ((pid !== null && !alive(pid)) || Date.now() - st.mtimeMs > staleMs) {
+        await breakLock(lock, pid);
+        continue;
+      }
+      if (!noticed) {
+        noticed = true;
+        stderr.write(WAITING_NOTICE);
+      }
+      await sleep(INSTALL_LOCK_RETRY_MS);
+      continue;
     }
+    try {
+      await fh.writeFile(String(process.pid));
+    } finally {
+      await fh.close();
+    }
+    break;
   }
+  const refresh = setInterval(() => {
+    const now = new Date();
+    utimes(lock, now, now).catch(() => {});
+  }, refreshMs);
+  refresh.unref();
   try {
     return await fn();
   } finally {
+    clearInterval(refresh);
     await unlink(lock).catch(() => {});
   }
 }
 
 // The configured channel's current build, downloaded on first use. Looking the build up needs
-// the network: when that fails or takes over resolveTimeoutMs, the newest build already
-// installed is used instead.
+// the network: when a build is already installed and the lookup fails or takes over
+// resolveTimeoutMs, the newest installed one is used instead. With nothing installed the lookup
+// is waited on for up to freshResolveTimeoutMs.
 export async function ensureChrome(
   cfg,
   p = paths(),
@@ -86,17 +135,21 @@ export async function ensureChrome(
     resolve = resolveBuildId,
     installer = install,
     resolveTimeoutMs = RESOLVE_TIMEOUT_MS,
+    freshResolveTimeoutMs = FRESH_RESOLVE_TIMEOUT_MS,
     lockStaleMs = INSTALL_LOCK_STALE_MS,
+    lockRefreshMs = INSTALL_LOCK_REFRESH_MS,
+    stderr = process.stderr,
   } = {},
 ) {
   const platform = detectBrowserPlatform();
   if (!platform) throw new Error(`Chrome for Testing has no build for ${process.platform}/${process.arch}`);
   const cacheDir = join(p.cache, 'browsers');
+  const have = await newestInstalled(cacheDir, platform);
   let buildId;
   try {
-    buildId = await withTimeout(Promise.resolve().then(() => resolve(Browser.CHROME, platform, cfg.chrome.channel)), resolveTimeoutMs);
+    const lookup = Promise.resolve().then(() => resolve(Browser.CHROME, platform, cfg.chrome.channel));
+    buildId = await withTimeout(lookup, have ? resolveTimeoutMs : freshResolveTimeoutMs);
   } catch (err) {
-    const have = await newestInstalled(cacheDir, platform);
     if (have) return have;
     throw new Error(`could not look up the current Chrome for Testing build (${err.message}) and none is installed in ${cacheDir}`);
   }
@@ -105,10 +158,10 @@ export async function ensureChrome(
   return withInstallLock(cacheDir, async () => {
     // Another process may have installed it while this one waited for the lock.
     if (await isExecutable(executablePath)) return { executablePath, buildId };
-    process.stderr.write(`termbrowse: downloading Chrome for Testing ${buildId} (one time)...\n`);
+    stderr.write(`termbrowse: downloading Chrome for Testing ${buildId} (one time)...\n`);
     const result = await installer({ cacheDir, browser: Browser.CHROME, buildId, platform });
     return { executablePath: result.executablePath, buildId };
-  }, lockStaleMs);
+  }, { staleMs: lockStaleMs, refreshMs: lockRefreshMs, stderr });
 }
 
 export function freePort() {

@@ -219,3 +219,87 @@ test('two concurrent ensureChrome calls install once', async () => {
   assert.equal(got[0].executablePath, got[1].executablePath);
   await access(got[0].executablePath, constants.X_OK);
 });
+
+// --- install lock: holder pid, staleness, refresh, waiting notice ---
+const lockFile = (p) => join(p.cache, 'browsers', 'install.lock');
+async function deadPid() {
+  const { spawn } = await import('node:child_process');
+  const c = spawn('/bin/sh', ['-c', 'exit 0']);
+  await new Promise((r) => c.once('exit', r));
+  return c.pid;
+}
+function sink() {
+  let text = '';
+  return { write: (s) => { text += s; return true; }, text: () => text };
+}
+const WAIT_MSG = 'termbrowse: waiting for another termbrowse to finish downloading Chrome…\n';
+
+test('an install lock left by a dead pid is taken over at once', async () => {
+  const p = await cachePaths();
+  const { mkdir: mk } = await import('node:fs/promises');
+  await mk(join(p.cache, 'browsers'), { recursive: true });
+  await writeFile(lockFile(p), String(await deadPid())); // fresh mtime: only the pid says it is stale
+  const err = sink();
+  const installer = async ({ buildId }) => ({ executablePath: await fakeInstalled(p, buildId) });
+  const t0 = Date.now();
+  const got = await ensureChrome(cfgStable, p, { resolve: async () => '12.0.0.0', installer, stderr: err });
+  assert.equal(got.buildId, '12.0.0.0');
+  assert.ok(Date.now() - t0 < 1000, `took ${Date.now() - t0} ms`);
+  assert.ok(!err.text().includes('waiting for another'), err.text());
+  await assert.rejects(access(lockFile(p)), 'lock released');
+});
+
+test('an install lock held by a live pid is waited on, with one notice', async () => {
+  const p = await cachePaths();
+  const { mkdir: mk, unlink: rmFile } = await import('node:fs/promises');
+  await mk(join(p.cache, 'browsers'), { recursive: true });
+  await writeFile(lockFile(p), String(process.pid));
+  const err = sink();
+  const installer = async ({ buildId }) => ({ executablePath: await fakeInstalled(p, buildId) });
+  let done = false;
+  const pr = ensureChrome(cfgStable, p, { resolve: async () => '13.0.0.0', installer, stderr: err }).then((r) => { done = true; return r; });
+  await new Promise((r) => setTimeout(r, 700));
+  assert.equal(done, false, 'must wait for the live holder');
+  assert.equal(err.text().split(WAIT_MSG).length - 1, 1, err.text());
+  await rmFile(lockFile(p));
+  assert.equal((await pr).buildId, '13.0.0.0');
+  assert.equal(err.text().split(WAIT_MSG).length - 1, 1, 'printed once');
+});
+
+test('the install lock records the holder pid and its mtime is refreshed during a long install', async () => {
+  const p = await cachePaths();
+  const { stat: st } = await import('node:fs/promises');
+  const seen = {};
+  const installer = async ({ buildId }) => {
+    seen.pid = (await readFile(lockFile(p), 'utf8')).trim();
+    const old = new Date(Date.now() - 60_000);
+    const { utimes } = await import('node:fs/promises');
+    await utimes(lockFile(p), old, old); // as if the download had been running a while
+    seen.before = (await st(lockFile(p))).mtimeMs;
+    await new Promise((r) => setTimeout(r, 300));
+    seen.after = (await st(lockFile(p))).mtimeMs;
+    return { executablePath: await fakeInstalled(p, buildId) };
+  };
+  await ensureChrome(cfgStable, p, { resolve: async () => '14.0.0.0', installer, lockRefreshMs: 50, stderr: sink() });
+  assert.equal(seen.pid, String(process.pid));
+  assert.ok(seen.after - seen.before > 30_000, `mtime not refreshed: ${seen.before} -> ${seen.after}`);
+});
+
+// --- version lookup cap: short only when a build is already installed ---
+test('with nothing installed, a lookup slower than the short cap still installs', async () => {
+  const p = await cachePaths();
+  const slow = () => new Promise((r) => setTimeout(() => r('15.0.0.0'), 300));
+  const installer = async ({ buildId }) => ({ executablePath: await fakeInstalled(p, buildId) });
+  const got = await ensureChrome(cfgStable, p, { resolve: slow, installer, resolveTimeoutMs: 100, stderr: sink() });
+  assert.equal(got.buildId, '15.0.0.0');
+});
+
+test('with nothing installed, a lookup that outlasts the long cap fails clearly', async () => {
+  const p = await cachePaths();
+  const t0 = Date.now();
+  await assert.rejects(
+    ensureChrome(cfgStable, p, { resolve: () => new Promise(() => {}), installer: () => { throw new Error('no'); }, resolveTimeoutMs: 50, freshResolveTimeoutMs: 300 }),
+    /could not look up the current Chrome for Testing build \(timed out after 300 ms\) and none is installed/,
+  );
+  assert.ok(Date.now() - t0 < 2000);
+});
