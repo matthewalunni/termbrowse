@@ -1,7 +1,7 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import { paths } from './paths.js';
-import { readRegistry } from './registry.js';
+import { paths, ensureStateDir } from './paths.js';
+import { readRegistry, alive as pidAlive } from './registry.js';
 
 const MARKER = '.termbrowse-last-used';
 const SKIP_FILES = new Set(['SingletonLock', 'SingletonSocket', 'SingletonCookie', 'DevToolsActivePort', 'lockfile']);
@@ -27,21 +27,15 @@ async function copyFilter(src) {
 export const agentProfile = (agentId, p = paths()) => profileFromStarter(path.join(p.profiles, sanitize(agentId)), p);
 
 // `termbrowse <url>` gets a fresh starter copy per run, named after the process that owns it.
-const STANDALONE = /^standalone-(\d+)$/;
+// An agent known only by its parent pid (no TERMBROWSE_AGENT, no Herdr) can't come back once
+// that process is gone, so its profile goes with it too.
+const PID_NAMED = /^(?:standalone|pid)-(\d+)$/;
 export const standaloneProfileDir = (pid, p = paths()) => path.join(p.profiles, `standalone-${pid}`);
-
-function pidAlive(pid) {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (e) {
-    return e.code === 'EPERM';
-  }
-}
 
 // Ensures `dir` exists as a Chrome profile, copied from the starter profile the first time
 // (when there is one), and marks it used now.
 export async function profileFromStarter(dir, p = paths()) {
+  await ensureStateDir(p);
   const exists = await fs.stat(dir).then(() => true, () => false);
   if (!exists) {
     const hasStarter = await fs.stat(p.starter).then((s) => s.isDirectory(), () => false);
@@ -81,9 +75,9 @@ export async function pruneProfiles(days, p = paths(), now = Date.now()) {
   const removed = [];
   for (const id of names) {
     if (liveIds.has(id)) continue;
-    const standalone = STANDALONE.exec(id);
-    if (standalone && Number(standalone[1]) > 0 && !pidAlive(Number(standalone[1]))) {
-      // Left behind by a run that died: it was only ever a copy, so age does not matter.
+    const owner = PID_NAMED.exec(id);
+    if (owner && !pidAlive(Number(owner[1]))) {
+      // Its process is gone and nothing can ask for this profile again, so age does not matter.
       await fs.rm(path.join(p.profiles, id), { recursive: true, force: true });
       removed.push(id);
       continue;

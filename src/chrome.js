@@ -173,7 +173,7 @@ export async function launchChrome({
   const args = chromeArgs({ port, profileDir, headless, windowSize, extraArgs, url });
 
   const { logs } = paths();
-  await mkdir(logs, { recursive: true });
+  await mkdir(logs, { recursive: true, mode: 0o700 });
   const tmpLog = join(logs, `chrome-starting-${process.pid}-${port}.log`);
   const fh = await open(tmpLog, 'a');
   // Attach listeners in the same tick as spawn: a spawn failure emits 'error' asynchronously.

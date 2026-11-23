@@ -1,6 +1,5 @@
 import fs from 'node:fs/promises';
-import path from 'node:path';
-import { paths } from './paths.js';
+import { paths, ensureStateDir } from './paths.js';
 
 const LOCK_RETRY_MS = 20;
 const LOCK_TIMEOUT_MS = 2000;
@@ -8,7 +7,9 @@ const LOCK_STALE_MS = 10_000;
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-function alive(pid) {
+export function alive(pid) {
+  // 0 and negative pids name process groups (0: our own), so they never mean a live entry.
+  if (!Number.isInteger(pid) || pid <= 0) return false;
   try {
     process.kill(pid, 0);
     return true;
@@ -38,14 +39,13 @@ async function load(p, quarantine = false) {
 }
 
 async function save(list, p) {
-  await fs.mkdir(path.dirname(p.registry), { recursive: true });
   const tmp = `${p.registry}.${process.pid}.${Math.random().toString(36).slice(2)}.tmp`;
   await fs.writeFile(tmp, JSON.stringify(list, null, 2));
   await fs.rename(tmp, p.registry);
 }
 
 async function withLock(p, fn) {
-  await fs.mkdir(path.dirname(p.registry), { recursive: true });
+  await ensureStateDir(p);
   const lock = `${p.registry}.lock`;
   const deadline = Date.now() + LOCK_TIMEOUT_MS;
   for (;;) {

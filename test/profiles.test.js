@@ -117,3 +117,34 @@ test('pruneProfiles removes standalone-<pid> dirs of dead pids regardless of age
     live.kill('SIGKILL');
   }
 });
+
+test('pruneProfiles removes pid-<pid> dirs of dead pids regardless of age', async () => {
+  const p = await tmpPaths();
+  const { spawn } = await import('node:child_process');
+  const live = spawn('sleep', ['30'], { stdio: 'ignore' });
+  const dead = spawn('true', { stdio: 'ignore' });
+  await new Promise((r) => dead.once('exit', r));
+  try {
+    const deadDir = await agentProfile(`pid-${dead.pid}`, p); // fresh marker: age alone would keep it
+    const liveDir = await agentProfile(`pid-${live.pid}`, p);
+    const otherDir = await agentProfile('pid-x', p);
+    assert.deepEqual(await pruneProfiles(7, p), [`pid-${dead.pid}`]);
+    assert.equal(await exists(deadDir), false);
+    assert.equal(await exists(liveDir), true);
+    assert.equal(await exists(otherDir), true);
+  } finally {
+    live.kill('SIGKILL');
+  }
+});
+
+test('the state and profiles dirs are created private (0700), also when they already exist', async () => {
+  const p = await tmpPaths();
+  await agentProfile('a', p);
+  assert.equal((await fs.stat(p.state)).mode & 0o777, 0o700);
+  assert.equal((await fs.stat(p.profiles)).mode & 0o777, 0o700);
+  await fs.chmod(p.state, 0o755);
+  await fs.chmod(p.profiles, 0o755);
+  await agentProfile('b', p);
+  assert.equal((await fs.stat(p.state)).mode & 0o777, 0o700);
+  assert.equal((await fs.stat(p.profiles)).mode & 0o777, 0o700);
+});

@@ -126,3 +126,20 @@ test('an entry whose wrapper died has its Chrome process group killed and is dro
     try { process.kill(-chrome.pid, 'SIGKILL'); } catch {}
   }
 });
+
+test('entries with a pid that is not a positive integer count as dead', async () => {
+  const p = await tmpPaths();
+  await upsertEntry(entry('live'), p);
+  // process.kill(0, 0) signals our own process group, so pid 0 would otherwise look alive.
+  for (const [id, pid] of [['zero', 0], ['negative', -1], ['string', String(process.pid)], ['fraction', 1.5], ['missing', undefined]]) {
+    await upsertEntry(entry(id, { pid, wrapperPid: undefined }), p);
+  }
+  assert.deepEqual((await readRegistry(p)).map((e) => e.agentId), ['live']);
+});
+
+test('the state dir is created private (0700)', async () => {
+  const home = await fs.mkdtemp(path.join(os.tmpdir(), 'tb-reg-'));
+  const p = paths({ HOME: home });
+  await upsertEntry(entry('a'), p);
+  assert.equal((await fs.stat(p.state)).mode & 0o777, 0o700);
+});
