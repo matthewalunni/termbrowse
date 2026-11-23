@@ -1,0 +1,14 @@
+{
+  "name": "termbrowse",
+  "description": "termbrowse: one Chrome per AI agent, watchable in your terminal.",
+  "owner": {
+    "name": "Matthew Alunni"
+  },
+  "plugins": [
+    {
+      "name": "termbrowse",
+      "source": "./",
+      "description": "One Chrome for Testing per AI agent through the chrome-devtools MCP server, which you can watch live in a terminal pane via Kitty graphics."
+    }
+  ]
+}

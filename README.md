@@ -69,17 +69,40 @@ or in `.mcp.json`:
 }
 ```
 
-Codex (`~/.codex/config.toml`):
+Codex (`~/.codex/config.toml`). Naming the server `chrome-devtools` replaces an existing chrome-devtools-mcp entry of that name, so the agent keeps the tool names it knows and gets only one browser server:
 
 ```toml
-[mcp_servers.termbrowse]
+[mcp_servers.chrome-devtools]
 command = "termbrowse"
 args = ["mcp"]
 ```
 
+For Claude Code, the plugin below sets this up for you.
+
 Arguments after `--` go to chrome-devtools-mcp: `termbrowse mcp -- --some-flag`.
 
 When the agent exits, its Chrome closes. If the MCP process is killed without cleaning up (SIGKILL, a crash), its Chrome is closed by the next termbrowse command that reads the list of browsers (`agents`, `stop`, `view --agent`, `mcp`, `termbrowse <url>`).
+
+## Claude Code plugin
+
+This repository is also a Claude Code plugin. The plugin doesn't contain a copy of termbrowse: its MCP server runs the `termbrowse` command from your PATH, so install the CLI first (see [Install](#install)) and check that `termbrowse doctor` reports `termbrowse on PATH: ok`.
+
+Then add this repository as a marketplace and install the plugin:
+
+```sh
+claude plugin marketplace add matthewalunni/termbrowse   # or the path to your checkout
+claude plugin install termbrowse@termbrowse
+```
+
+The plugin provides:
+
+- an MCP server named `chrome-devtools` that runs `termbrowse mcp`, so each agent gets its own Chrome for Testing. Its tools are called `mcp__plugin_termbrowse_chrome-devtools__<tool>`.
+- the skills from Google's chrome-devtools-mcp plugin (`chrome-devtools`, `a11y-debugging`, `cookie-debugging`, `debug-optimize-lcp`, `memory-leak-debugging`, `troubleshooting`), copied unchanged from version 1.11.0. Its `chrome-devtools-cli` skill is left out because it drives Google's separate `chrome-devtools` CLI, not termbrowse.
+- `watch-browser`, a skill that has the agent tell you the `termbrowse view --agent <id>` command for its browser and, in Herdr, offer to open it in a pane beside its own.
+
+If you have Google's `chrome-devtools-mcp` plugin installed, disable it (`claude plugin disable chrome-devtools-mcp@claude-plugins-official`). Otherwise each agent gets two browser servers with the same tools: Google's, which drives a Chrome of its own that termbrowse can't show, and termbrowse's. You could switch off just its server in `/mcp`, but its skills would still load next to the copies in this plugin, so disabling the whole plugin is simpler.
+
+The copied skills are © Google LLC under the Apache License 2.0; see [`skills/NOTICE`](skills/NOTICE) and [`skills/LICENSE-APACHE-2.0`](skills/LICENSE-APACHE-2.0). The plugin files (`.claude-plugin/`, `skills/`) aren't part of the npm package.
 
 ## Other commands
 
@@ -88,7 +111,7 @@ termbrowse agents [--json]          # live Chromes: AGENT  KIND  PORT  PID  URL
 termbrowse stop --agent ID          # close one agent's Chrome
 termbrowse stop --all               # close every Chrome termbrowse started
 termbrowse login [url] [--reset]    # sign in once, for every new profile
-termbrowse doctor                   # check Node, config, Chrome, display, libraries, terminal
+termbrowse doctor                   # check Node, config, Chrome, display, libraries, PATH, terminal
 termbrowse --version
 ```
 

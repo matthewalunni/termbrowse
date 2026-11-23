@@ -6,6 +6,7 @@
   "license": "MIT",
   "private": true,
   "bin": { "termbrowse": "bin/termbrowse.js" },
+  "files": ["bin/", "src/"],
   "engines": { "node": ">=22" },
   "scripts": { "test": "node --test 'test/**/*.test.js'" },
   "dependencies": {

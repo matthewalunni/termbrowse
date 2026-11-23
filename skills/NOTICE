@@ -1,0 +1,18 @@
+Third-party notice for the skills in this directory
+
+The following skills are copied from Chrome DevTools MCP
+(https://github.com/ChromeDevTools/chrome-devtools-mcp), version 1.11.0:
+
+  a11y-debugging, chrome-devtools, cookie-debugging, debug-optimize-lcp,
+  memory-leak-debugging, troubleshooting (each with its references/ files)
+
+Copyright 2025 Google LLC
+Licensed under the Apache License, Version 2.0; a copy is in LICENSE-APACHE-2.0
+in this directory, and at http://www.apache.org/licenses/LICENSE-2.0.
+
+They are included unmodified. The upstream chrome-devtools-cli skill is not
+included, because it drives the separate `chrome-devtools` CLI rather than
+termbrowse.
+
+The watch-browser skill is part of termbrowse and is licensed under MIT
+(see ../LICENSE).
