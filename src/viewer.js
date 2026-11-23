@@ -16,6 +16,28 @@ export function nextEveryNth(current, sizes) {
   return current;
 }
 
+// Escape sequences a terminal sends: CSI (arrow keys, DA1 replies), OSC/APC/DCS strings
+// (Kitty graphics replies), SS3, and two-byte ones.
+const ESCAPE_SEQ = /\x1b(?:\[[0-?]*[ -/]*[@-~]|[\]_P^X][\s\S]*?(?:\x1b\\|\x07)|O.|[\s\S])/g;
+
+// Whether a stdin chunk asks to quit: a q or Ctrl-C outside any escape sequence.
+export function keyQuits(chunk) {
+  const rest = String(chunk).replace(ESCAPE_SEQ, '');
+  return rest.includes('q') || rest.includes('\x03');
+}
+
+// Whether a newly created target is a tab the user (or agent) opened, worth following.
+// Not prerendered pages, extension pages or DevTools; chrome:// only for the new-tab page.
+export function followable(info) {
+  if (info?.type !== 'page' || info.subtype) return false;
+  const url = info.url ?? '';
+  if (/^(chrome-extension|devtools):/i.test(url)) return false;
+  if (/^chrome:/i.test(url)) return /^chrome:\/\/newtab\b/i.test(url);
+  return true;
+}
+
+const RESIZE_DEBOUNCE_MS = 150;
+
 export async function runViewer({
   port,
   match,
@@ -63,6 +85,7 @@ export async function runViewer({
   let browser = null;
   let lastFrameAt = 0; // when the last frame arrived (Chrome sends none while the page is still)
   let filled = null; // the page session the size override was set on
+  let repaint = false; // the pane changed size: clear it together with the next frame drawn
   const received = []; // {t, size} for frames received in the last second
   const drawn = []; // timestamps of frames drawn in the last second
   let resolveRun;
@@ -96,20 +119,27 @@ export async function runViewer({
   const stopScreencast = () => page.send('Page.stopScreencast').catch(() => {});
   // The page lays out at the image area the screencast is sized to, so frames fill the pane.
   const applyFill = async () => {
-    if (!fill || !saneSize(term)) return;
+    if (!fill || !saneSize(term) || closing) return;
     const { maxWidth: width, maxHeight: height } = screencastSize(term);
-    filled = page;
-    await page.send('Emulation.setDeviceMetricsOverride', { width, height, deviceScaleFactor: 1, mobile: false }).catch(() => {});
+    const session = page;
+    filled = session;
+    await session.send('Emulation.setDeviceMetricsOverride', { width, height, deviceScaleFactor: 1, mobile: false }).catch(() => {});
+    // The viewer finished while the override was on its way: take it back off.
+    if (closing) await clearOverride(session);
   };
   // Best effort, never throws, at most 500 ms.
+  const clearOverride = async (session) => {
+    let timer;
+    await Promise.race([
+      session.send('Emulation.clearDeviceMetricsOverride').catch(() => {}),
+      new Promise((r) => { timer = setTimeout(r, 500); timer.unref?.(); }),
+    ]);
+    clearTimeout(timer);
+  };
   const clearFill = async () => {
     const session = filled;
     filled = null;
-    if (!session) return;
-    await Promise.race([
-      session.send('Emulation.clearDeviceMetricsOverride').catch(() => {}),
-      new Promise((r) => setTimeout(r, 500)),
-    ]);
+    if (session) await clearOverride(session);
   };
   const restartScreencast = async () => {
     await stopScreencast();
@@ -138,7 +168,9 @@ export async function runViewer({
     }
     drawn.push(now);
     status = statusText(`${drawn.length} fps`);
-    if (!stdout.write(frame + statusSeq(status))) {
+    const clear = repaint ? `${deleteAll()}${ESC}[2J` : '';
+    repaint = false;
+    if (!stdout.write(clear + frame + statusSeq(status))) {
       busy = true;
       stdout.once('drain', () => { busy = false; });
     }
@@ -156,8 +188,11 @@ export async function runViewer({
     if (closing) return;
     closing = true;
     clearInterval(ticker);
+    clearTimeout(resizeTimer);
     stdin.removeListener('data', onKey);
     for (const [sig, fn] of sigHandlers) signals.removeListener(sig, fn);
+    // A size query in flight puts raw mode back as it found it when it ends: let it end first.
+    await Promise.race([resizing, new Promise((r) => setTimeout(r, 1000))]);
     if (code === 0) {
       await Promise.race([Promise.all([stopScreencast(), clearFill()]), new Promise((r) => setTimeout(r, 500))]);
     } else {
@@ -190,8 +225,10 @@ export async function runViewer({
     attachPage(next);
     if (old !== next) old.close();
     await page.send('Page.enable').catch(() => {});
+    if (closing || page !== next) return;
     if (!paused) {
       await applyFill();
+      if (closing || page !== next) return;
       await startScreencast();
       setStatus(fpsSuffix(), true);
     }
@@ -205,14 +242,23 @@ export async function runViewer({
     return wsUrl ?? `ws://127.0.0.1:${port}/devtools/page/${targetId}`;
   };
 
-  const switchTo = async (targetId, newUrl) => {
+  // New tabs are switched to one at a time, in the order they were created; one that is
+  // superseded by a later tab before it is connected is dropped, so the latest one wins.
+  let switching = Promise.resolve();
+  let latestSwitch = 0;
+  const follow = (targetId, newUrl) => {
+    const seq = ++latestSwitch;
+    switching = switching.then(() => (seq === latestSwitch ? switchTo(targetId, newUrl, seq) : undefined));
+  };
+
+  const switchTo = async (targetId, newUrl, seq) => {
     let next;
     try {
       next = await CdpSession.connect(await wsFor(targetId));
     } catch {
       return; // keep the current page
     }
-    if (closing) { next.close(); return; }
+    if (closing || seq !== latestSwitch) { next.close(); return; }
     // openerId: the tab to go back to when this one closes (the one viewed until now).
     await adopt(next, { id: targetId, url: newUrl, openerId: target.id });
   };
@@ -235,6 +281,8 @@ export async function runViewer({
     }
   };
 
+  // The last frame stays up until the first one at the new size replaces it (repaint), so a
+  // resize does not blank the pane.
   let resizing = Promise.resolve();
   const resize = () => {
     resizing = resizing.then(async () => {
@@ -242,13 +290,15 @@ export async function runViewer({
       const next = await termSize(stdin, stdout);
       if (closing) return;
       term = next;
-      stdout.write(`${deleteAll()}${ESC}[2J`);
       if (!saneSize(term)) {
         paused = true;
+        repaint = false;
+        stdout.write(`${deleteAll()}${ESC}[2J`);
         await stopScreencast();
         setStatus('paused', true);
       } else {
         paused = false;
+        repaint = true;
         await applyFill();
         await restartScreencast();
         setStatus(fpsSuffix(), true);
@@ -257,14 +307,19 @@ export async function runViewer({
     return resizing;
   };
 
+  // A drag-resize sends a burst of SIGWINCH: act once it settles.
+  let resizeTimer;
+  const scheduleResize = () => {
+    clearTimeout(resizeTimer);
+    resizeTimer = setTimeout(() => { resize(); }, RESIZE_DEBOUNCE_MS);
+  };
+
   const onKey = (chunk) => {
-    const s = String(chunk);
-    if (s.includes(ESC)) return; // terminal replies, arrow keys, ...
-    if (s.includes('q') || s.includes('\x03')) finish(0);
+    if (keyQuits(chunk)) finish(0);
   };
 
   const sigHandlers = [
-    ['SIGWINCH', () => { resize(); }],
+    ['SIGWINCH', scheduleResize],
     ['SIGINT', () => finish(0)],
     ['SIGTERM', () => finish(0)],
     ['SIGHUP', () => finish(0)],
@@ -305,9 +360,9 @@ export async function runViewer({
     browser.addEventListener('event', (e) => {
       const { method, params } = e.detail;
       const info = params?.targetInfo;
-      if (closing || method !== 'Target.targetCreated' || info?.type !== 'page') return;
+      if (closing || method !== 'Target.targetCreated' || !followable(info)) return;
       if (existing.has(info.targetId) || info.targetId === target.id) return;
-      switchTo(info.targetId, info.url);
+      follow(info.targetId, info.url);
     });
     await browser.send('Target.setDiscoverTargets', { discover: true }).catch(() => {});
   })();

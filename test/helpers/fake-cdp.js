@@ -4,11 +4,20 @@ import { WebSocketServer } from 'ws';
 // Fake Chrome DevTools endpoint: HTTP discovery + a CDP WebSocket.
 // handlers: { 'Method.name': (params, msg) => result | Promise<result> }
 // A handler that throws replies with a CDP error {code, message}.
-export async function startFakeCdp({ handlers = {}, targets } = {}) {
+// connectDelay(url): ms to hold a WebSocket handshake for (e.g. to slow one tab's connect).
+export async function startFakeCdp({ handlers = {}, targets, connectDelay } = {}) {
   const received = [];
   const sockets = new Set();
   const server = http.createServer();
-  const wss = new WebSocketServer({ server, path: '/devtools/page/fake' });
+  const wss = new WebSocketServer({
+    server,
+    path: '/devtools/page/fake',
+    verifyClient: ({ req }, cb) => {
+      const ms = connectDelay?.(req.url) ?? 0;
+      if (ms > 0) setTimeout(() => cb(true), ms);
+      else cb(true);
+    },
+  });
   let port;
   let conns = 0;
   const wsUrl = () => `ws://127.0.0.1:${port}/devtools/page/fake`;

@@ -2,8 +2,8 @@ import { test, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
 import { PassThrough } from 'node:stream';
-import { runViewer, nextEveryNth } from '../src/viewer.js';
-import { kittyQuery, leaveScreen } from '../src/kitty.js';
+import { runViewer, nextEveryNth, keyQuits, followable } from '../src/viewer.js';
+import { kittyQuery, leaveScreen, deleteAll } from '../src/kitty.js';
 import { startFakeCdp } from './helpers/fake-cdp.js';
 
 const ESC = '\x1b';
@@ -405,4 +405,211 @@ test('status says idle, not 0 fps, once frames stop', async () => {
   assert.doesNotMatch(t.out(), / 0 fps/);
   t.stdin.write('q');
   assert.equal(await p, 0);
+});
+
+// --- resize debounce (no flicker) ---
+test('a burst of resizes restarts once and keeps the last frame until a new one draws', async () => {
+  fake = await startFakeCdp();
+  const t = fakeTerm();
+  const { p } = start(t, { fill: true });
+  await until(() => methods(fake, 'Page.startScreencast').length === 1 && methods(fake, SET).length === 1);
+  const from = t.out().length;
+  Object.assign(t.size, { cols: 80, rows: 25, pxW: 800, pxH: 500 });
+  for (let i = 0; i < 10; i++) {
+    t.signals.emit('SIGWINCH');
+    await new Promise((r) => setTimeout(r, 10));
+  }
+  const burst = t.out().slice(from);
+  assert.ok(!burst.includes(deleteAll()) && !burst.includes(`${ESC}[2J`), 'cleared during the burst');
+  await until(() => methods(fake, 'Page.startScreencast').length === 2);
+  await new Promise((r) => setTimeout(r, 400));
+  assert.equal(methods(fake, 'Page.startScreencast').length, 2, 'one restart');
+  assert.equal(methods(fake, SET).length, 2, 'one re-fit');
+  assert.ok(!t.out().slice(from).includes(deleteAll()), 'old frame kept while no new frame has come');
+  // The next frame clears and draws in one write.
+  fake.send({ method: 'Page.screencastFrame', params: { data: fakePng(800, 480), sessionId: 9, metadata: {} } });
+  await until(() => t.out().slice(from).includes('a=T,f=100'));
+  const after = t.out().slice(from);
+  assert.ok(after.indexOf(deleteAll()) >= 0 && after.indexOf(deleteAll()) < after.indexOf('a=T,f=100'));
+  t.stdin.write('q');
+  assert.equal(await p, 0);
+});
+
+// --- which new tabs are followed ---
+test('prerender targets and non-web URLs are not followed; chrome://newtab is', async () => {
+  const targets = [{ id: 'T1', type: 'page', url: 'https://example.com/', title: 'Example' }];
+  fake = await startFakeCdpWith(targets);
+  const t = fakeTerm();
+  const { p } = start(t);
+  await until(() => methods(fake, 'Target.setDiscoverTargets').length === 1 && methods(fake, 'Page.startScreencast').length === 1);
+  const skipped = [
+    { targetId: 'P1', type: 'page', subtype: 'prerender', url: 'https://example.com/next' },
+    { targetId: 'X1', type: 'page', url: 'chrome-extension://abc/popup.html' },
+    { targetId: 'D1', type: 'page', url: 'devtools://devtools/bundled/inspector.html' },
+    { targetId: 'C1', type: 'page', url: 'chrome://settings/' },
+  ];
+  for (const info of skipped) {
+    targets.push({ id: info.targetId, type: 'page', url: info.url, webSocketDebuggerUrl: fake.wsUrl });
+    fake.send({ method: 'Target.targetCreated', params: { targetInfo: info } });
+  }
+  await new Promise((r) => setTimeout(r, 300));
+  assert.equal(methods(fake, 'Page.startScreencast').length, 1, 'followed a tab it should not');
+  targets.push({ id: 'N1', type: 'page', url: 'chrome://newtab/', webSocketDebuggerUrl: fake.wsUrl });
+  fake.send({ method: 'Target.targetCreated', params: { targetInfo: { targetId: 'N1', type: 'page', url: 'chrome://newtab/' } } });
+  await until(() => methods(fake, 'Page.startScreencast').length === 2);
+  await until(() => t.out().includes('chrome://newtab/'));
+  t.stdin.write('q');
+  assert.equal(await p, 0);
+});
+
+test('two tabs created back to back: the viewer ends on the later one', async () => {
+  const targets = [{ id: 'T1', type: 'page', url: 'https://example.com/', title: 'Example' }];
+  // The first new tab's socket is slow to open, so without ordering it would be adopted last.
+  fake = await startFakeCdp({ targets, connectDelay: (url) => (url.includes('slow') ? 300 : 0) });
+  targets[0].webSocketDebuggerUrl = fake.wsUrl;
+  const t = fakeTerm();
+  const { p } = start(t);
+  await until(() => methods(fake, 'Target.setDiscoverTargets').length === 1 && methods(fake, 'Page.startScreencast').length === 1);
+  targets.push({ id: 'T2', type: 'page', url: 'https://first.example/', webSocketDebuggerUrl: `${fake.wsUrl}?slow` });
+  targets.push({ id: 'T3', type: 'page', url: 'https://second.example/', webSocketDebuggerUrl: fake.wsUrl });
+  fake.send({ method: 'Target.targetCreated', params: { targetInfo: { targetId: 'T2', type: 'page', url: 'https://first.example/' } } });
+  fake.send({ method: 'Target.targetCreated', params: { targetInfo: { targetId: 'T3', type: 'page', url: 'https://second.example/' } } });
+  await until(() => t.out().includes('https://second.example/'));
+  await new Promise((r) => setTimeout(r, 600)); // the slow one has connected by now
+  const out = t.out();
+  assert.ok(out.lastIndexOf('https://second.example/') > out.lastIndexOf('https://first.example/'), 'ended on the earlier tab');
+  t.stdin.write('q');
+  assert.equal(await p, 0);
+});
+
+// --- fill override on every way out ---
+const lastOverride = (conn) => fake.received.filter((m) => m.conn === conn && (m.method === SET || m.method === CLEAR)).at(-1)?.method;
+
+test('fill: SIGTERM clears the override', async () => {
+  fake = await startFakeCdp();
+  const t = fakeTerm();
+  const { p } = start(t, { fill: true });
+  await until(() => methods(fake, SET).length === 1);
+  const conn = methods(fake, SET)[0].conn;
+  t.signals.emit('SIGTERM');
+  assert.equal(await p, 0);
+  assert.equal(lastOverride(conn), CLEAR);
+});
+
+test('fill: re-applied on re-attach after the tab closes, and cleared on exit', async () => {
+  fake = await startFakeCdpWith([
+    { id: 'T1', type: 'page', url: 'https://example.com/', title: 'Example' },
+    { id: 'T2', type: 'page', url: 'https://other.example/', title: 'Other' },
+  ]);
+  const t = fakeTerm();
+  const { p } = start(t, { fill: true });
+  await until(() => methods(fake, SET).length === 1);
+  const first = methods(fake, SET)[0].conn;
+  fake.closeSockets();
+  await until(() => methods(fake, SET).some((m) => m.conn !== first));
+  const second = methods(fake, SET).at(-1).conn;
+  t.stdin.write('q');
+  assert.equal(await p, 0);
+  assert.equal(lastOverride(second), CLEAR);
+});
+
+test('fill: SIGTERM while re-attaching leaves no override behind', async () => {
+  let enables = 0;
+  const targets = [
+    { id: 'T1', type: 'page', url: 'https://example.com/', title: 'Example' },
+    { id: 'T2', type: 'page', url: 'https://other.example/', title: 'Other' },
+  ];
+  let t;
+  fake = await startFakeCdp({
+    targets,
+    handlers: {
+      'Page.enable': async () => {
+        if (++enables < 2) return {};
+        setImmediate(() => t.signals.emit('SIGTERM')); // quit while the new tab is being set up
+        await new Promise((r) => setTimeout(r, 100));
+        return {};
+      },
+      'Page.stopScreencast': () => new Promise((r) => setTimeout(() => r({}), 300)),
+    },
+  });
+  for (const x of targets) x.webSocketDebuggerUrl = fake.wsUrl;
+  t = fakeTerm();
+  const { p } = start(t, { fill: true });
+  await until(() => methods(fake, SET).length === 1);
+  const closedTab = methods(fake, SET)[0].conn; // its override went with the tab
+  fake.closeSockets();
+  assert.equal(await p, 0);
+  await new Promise((r) => setTimeout(r, 200));
+  const conns = new Set(fake.received.map((m) => m.conn).filter((c) => c !== closedTab));
+  assert.ok(conns.size > 0);
+  for (const c of conns) assert.notEqual(lastOverride(c), SET, `override left on connection ${c}`);
+});
+
+test('fill: Chrome going away (exit 1) with fill on still restores the terminal', async () => {
+  fake = await startFakeCdp();
+  const t = fakeTerm();
+  const { p } = start(t, { fill: true });
+  await until(() => methods(fake, SET).length === 1);
+  const dead = fake;
+  fake = null;
+  await dead.close();
+  assert.equal(await p, 1);
+  assert.ok(t.out().endsWith(leaveScreen()));
+  assert.equal(t.stdin.isRaw, false);
+});
+
+// --- keys and finishing ---
+test('q in the same chunk as a terminal reply still quits; an arrow key alone does not', async () => {
+  fake = await startFakeCdp();
+  const t = fakeTerm();
+  const { p } = start(t);
+  await until(() => methods(fake, 'Page.startScreencast').length === 1);
+  let done = false;
+  p.then(() => { done = true; });
+  t.stdin.write(`${ESC}[A`);
+  t.stdin.write(`${ESC}_Gi=31;OK${ESC}\\`);
+  await new Promise((r) => setTimeout(r, 100));
+  assert.equal(done, false, 'an escape sequence alone quit');
+  t.stdin.write(`${ESC}[?62;cq`);
+  assert.equal(await p, 0);
+});
+
+test('quitting during a resize waits for it, so raw mode is restored as it was', async () => {
+  fake = await startFakeCdp();
+  const t = fakeTerm();
+  const { p, controls } = start(t);
+  await until(() => methods(fake, 'Page.startScreencast').length === 1);
+  const write = t.stdout.write;
+  t.stdout.write = (chunk, ...rest) => {
+    if (!String(chunk).includes(`${ESC}[16t`)) return write(chunk, ...rest);
+    // A size query the terminal is slow to answer: quit while it is pending.
+    setImmediate(() => t.signals.emit('SIGTERM'));
+    return true;
+  };
+  controls().resize();
+  assert.equal(await p, 0);
+  await new Promise((r) => setTimeout(r, 1000)); // past the query's own timeout
+  assert.equal(t.stdin.isRaw, false);
+});
+
+test('keyQuits ignores q inside escape sequences only', () => {
+  assert.equal(keyQuits('q'), true);
+  assert.equal(keyQuits('\x03'), true);
+  assert.equal(keyQuits(`${ESC}[A`), false);
+  assert.equal(keyQuits(`${ESC}[?62;c`), false);
+  assert.equal(keyQuits(`${ESC}_Gi=31;OK${ESC}\\`), false);
+  assert.equal(keyQuits(`${ESC}]11;rgb:qqqq/0000/0000${ESC}\\`), false);
+  assert.equal(keyQuits(`${ESC}[?62;cq`), true);
+  assert.equal(keyQuits(`q${ESC}[6;24;12t`), true);
+});
+
+test('followable: web pages and the new-tab page, not prerenders, extensions or DevTools', () => {
+  assert.equal(followable({ type: 'page', url: 'https://a.example/' }), true);
+  assert.equal(followable({ type: 'page', url: 'about:blank' }), true);
+  assert.equal(followable({ type: 'page', url: 'chrome://newtab/' }), true);
+  assert.equal(followable({ type: 'page', subtype: 'prerender', url: 'https://a.example/' }), false);
+  assert.equal(followable({ type: 'page', url: 'chrome://settings/' }), false);
+  assert.equal(followable({ type: 'page', url: 'chrome-extension://x/p.html' }), false);
+  assert.equal(followable({ type: 'page', url: 'devtools://devtools/x' }), false);
+  assert.equal(followable({ type: 'service_worker', url: 'https://a.example/sw.js' }), false);
 });
