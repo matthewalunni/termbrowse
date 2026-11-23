@@ -17,7 +17,8 @@ import { listTargets } from './cdp.js';
 import { agentId } from './agent-id.js';
 
 const require = createRequire(import.meta.url);
-const STOP_GRACE_MS = 2000;
+const STOP_GRACE_MS = 2000; // after stdin ends, before SIGTERM
+const KILL_GRACE_MS = 3000; // after SIGTERM, before SIGKILL
 
 const log = (msg) => process.stderr.write(`termbrowse mcp: ${msg}\n`);
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -57,7 +58,17 @@ function parse(line) {
 
 const isToolsCall = (msg) => (Array.isArray(msg) ? msg : [msg]).some((m) => m?.method === 'tools/call');
 
-export async function runMcp(extraArgs = [], { stdin = process.stdin, stdout = process.stdout, env = process.env } = {}) {
+export async function runMcp(
+  extraArgs = [],
+  {
+    stdin = process.stdin,
+    stdout = process.stdout,
+    env = process.env,
+    mcpBin: bin = mcpBin(),
+    stopGraceMs = STOP_GRACE_MS,
+    killGraceMs = KILL_GRACE_MS,
+  } = {},
+) {
   const id = agentId(env);
   const p = paths(env);
   const cfg = await loadConfig(env);
@@ -104,7 +115,7 @@ export async function runMcp(extraArgs = [], { stdin = process.stdin, stdout = p
     announce(c); // fire and forget: a slow hook must not hold up the tool call (runHook never rejects)
   }
 
-  const child = spawn(process.execPath, [mcpBin(), '--browserUrl', `http://127.0.0.1:${port}`, ...extraArgs], {
+  const child = spawn(process.execPath, [bin, '--browserUrl', `http://127.0.0.1:${port}`, ...extraArgs], {
     stdio: ['pipe', 'pipe', 'inherit'],
     env,
   });
@@ -141,7 +152,8 @@ export async function runMcp(extraArgs = [], { stdin = process.stdin, stdout = p
     killTimer = setTimeout(() => {
       killedByUs = true;
       child.kill('SIGTERM');
-    }, STOP_GRACE_MS);
+      killTimer = setTimeout(() => child.kill('SIGKILL'), killGraceMs);
+    }, stopGraceMs);
   }
 
   async function drain() {
@@ -154,7 +166,10 @@ export async function runMcp(extraArgs = [], { stdin = process.stdin, stdout = p
         } catch (err) {
           log(`could not start Chrome: ${err.message}`);
           if (!Array.isArray(msg)) {
-            out(`${JSON.stringify({ jsonrpc: '2.0', id: msg.id, error: { code: -32000, message: `termbrowse: could not start Chrome: ${err.message}` } })}\n`);
+            // A notification (no id) gets no reply, even an error; it is dropped.
+            if (msg.id !== undefined) {
+              out(`${JSON.stringify({ jsonrpc: '2.0', id: msg.id, error: { code: -32000, message: `termbrowse: could not start Chrome: ${err.message}` } })}\n`);
+            }
             continue;
           }
           // A batch goes through anyway; chrome-devtools-mcp reports the missing browser per call.

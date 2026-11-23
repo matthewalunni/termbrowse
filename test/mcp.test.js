@@ -63,6 +63,7 @@ class Wrapper {
     });
     this.exit = new Promise((r) => this.child.once('exit', (code) => r(code)));
     this.waiters = new Map();
+    this.lines = [];
     this.nextId = 1;
     let buf = '';
     this.child.stdout.setEncoding('utf8');
@@ -74,6 +75,7 @@ class Wrapper {
         buf = buf.slice(i + 1);
         if (!line.trim()) continue;
         const msg = JSON.parse(line);
+        this.lines.push(msg);
         this.waiters.get(msg.id)?.(msg);
       }
     });
@@ -248,4 +250,46 @@ test('a second wrapper for the same agent shares its Chrome and leaves it runnin
   assert.equal(await e1.exit, 0);
   assert.ok(await until(() => !alive(first.pid), 5000));
   assert.equal(await findEntry('test-e', p), null);
+});
+
+test('an id-less tools/call (a notification) whose launch fails gets no reply', { skip, timeout: 60_000 }, async () => {
+  const blocker = join(p.profiles, 'test-n');
+  await mkdir(p.profiles, { recursive: true });
+  await writeFile(blocker, '');
+  const n = new Wrapper('test-n');
+  try {
+    await n.init();
+    const before = n.lines.length;
+    n.notify('tools/call', { name: 'list_pages', arguments: {} });
+    const list = await n.request('tools/list');
+    assert.ok(list.result.tools.length > 0);
+    const extra = n.lines.slice(before).filter((m) => m !== list);
+    assert.deepEqual(extra, [], 'replied to a notification');
+  } finally {
+    n.child.stdin.end();
+    await n.exit;
+    await rm(blocker, { force: true });
+  }
+});
+
+test('shutdown SIGKILLs a chrome-devtools-mcp that ignores SIGTERM', { timeout: 30_000 }, async () => {
+  const { runMcp } = await import('../src/mcp.js');
+  const { PassThrough } = await import('node:stream');
+  const pidFile = join(tmp, 'stubborn-mcp.pid');
+  const script = join(tmp, 'stubborn-mcp.mjs');
+  await writeFile(script, `import { writeFileSync } from 'node:fs';
+process.on('SIGTERM', () => {});
+writeFileSync(${JSON.stringify(pidFile)}, String(process.pid));
+process.stdin.resume();
+setInterval(() => {}, 1000);
+`);
+  const stdin = new PassThrough();
+  const stdout = new PassThrough();
+  const done = runMcp([], { stdin, stdout, env: { ...env, TERMBROWSE_AGENT: 'test-k' }, mcpBin: script, stopGraceMs: 100, killGraceMs: 300 });
+  const pid = Number(await until(() => readFile(pidFile, 'utf8').catch(() => '')));
+  stdin.end();
+  const t0 = Date.now();
+  assert.equal(await done, 0);
+  assert.ok(Date.now() - t0 >= 300, 'did not wait for SIGTERM first');
+  assert.equal(alive(pid), false);
 });
