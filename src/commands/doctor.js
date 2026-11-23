@@ -33,11 +33,52 @@ async function checkChrome(cfg, p) {
   }
 }
 
+// Debian/Ubuntu (t64 names, as on Ubuntu 24.04 and Debian 13) package for each library
+// Chrome for Testing needs that a minimal system may lack, by .so name without its version.
+const DEBIAN_PACKAGES = {
+  libnss3: 'libnss3', libnssutil3: 'libnss3', libsmime3: 'libnss3',
+  libnspr4: 'libnspr4', libplc4: 'libnspr4', libplds4: 'libnspr4',
+  'libatk-1.0': 'libatk1.0-0t64',
+  'libatk-bridge-2.0': 'libatk-bridge2.0-0t64',
+  libcups: 'libcups2t64',
+  libxkbcommon: 'libxkbcommon0',
+  libasound: 'libasound2t64',
+  libcairo: 'libcairo2',
+  'libpango-1.0': 'libpango-1.0-0',
+  libXdamage: 'libxdamage1',
+  libatspi: 'libatspi2.0-0t64',
+  libgbm: 'libgbm1',
+  libXcomposite: 'libxcomposite1',
+  libXrandr: 'libxrandr2',
+  libXfixes: 'libxfixes3',
+};
+
+// The packages that provide the missing libraries, in order, each once; libraries with no
+// known package are returned as-is in `unknown`.
+export function aptPackages(missing) {
+  const packages = [];
+  const unknown = [];
+  for (const lib of missing) {
+    const pkg = DEBIAN_PACKAGES[lib.replace(/\.so(\.\d+)*$/, '')];
+    if (!pkg) unknown.push(lib);
+    else if (!packages.includes(pkg)) packages.push(pkg);
+  }
+  return { packages, unknown };
+}
+
+export function aptHint(missing) {
+  const { packages, unknown } = aptPackages(missing);
+  const parts = [];
+  if (packages.length) parts.push(`install with: sudo apt install ${packages.join(' ')}`);
+  if (unknown.length) parts.push(`no package known for: ${unknown.join(', ')}`);
+  return parts.join('; ');
+}
+
 async function checkLdd(executablePath) {
   try {
     const { stdout } = await promisify(execFile)('ldd', [executablePath], { maxBuffer: 4 << 20 });
     const missing = stdout.split('\n').filter((l) => l.includes('not found')).map((l) => l.trim().split(/\s+/)[0]);
-    return missing.length ? ['fail', `missing ${missing.join(', ')}`] : ['ok', ''];
+    return missing.length ? ['fail', `missing ${missing.join(', ')}; ${aptHint(missing)}`] : ['ok', ''];
   } catch (err) {
     return ['warn', `could not run ldd: ${err.message}`];
   }
