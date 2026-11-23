@@ -13,6 +13,43 @@ function parseBool(value, key, file) {
   return value;
 }
 
+const NAMED_KEYS = { escape: 'Escape', tab: 'Tab', enter: 'Enter', space: 'Space' };
+
+export function parseKeySpec(str) {
+  const original = String(str);
+  let ctrl = false;
+  let alt = false;
+  let rest = original.trim();
+  for (;;) {
+    const lower = rest.toLowerCase();
+    if (lower.startsWith('ctrl-') && rest.length > 5) { ctrl = true; rest = rest.slice(5); } else if (lower.startsWith('alt-') && rest.length > 4) { alt = true; rest = rest.slice(4); } else break;
+  }
+  const lower = rest.toLowerCase();
+  let key;
+  if (NAMED_KEYS[lower]) key = NAMED_KEYS[lower];
+  else if (/^f([1-9]|1[0-2])$/.test(lower)) key = lower.toUpperCase();
+  else if ([...rest].length === 1) key = rest;
+  else throw new Error(`invalid key "${original}" (expected e.g. "ctrl-]", "alt-x", "g", "f2", "escape")`);
+  const label = `${ctrl ? 'Ctrl-' : ''}${alt ? 'Alt-' : ''}${key}`;
+  return { key, ctrl, alt, label };
+}
+
+const DURATION_UNITS = { ms: 1, s: 1000, m: 60000, h: 3600000 };
+
+export function parseDuration(str) {
+  const m = /^(\d+)(ms|s|m|h)$/.exec(String(str).trim());
+  if (!m) throw new Error(`invalid duration "${str}" (expected e.g. "90s", "5m", "2h")`);
+  return Number(m[1]) * DURATION_UNITS[m[2]];
+}
+
+function inFile(file, key, fn, value) {
+  try {
+    return fn(value);
+  } catch (err) {
+    throw new Error(`${file}: ${key}: ${err.message}`);
+  }
+}
+
 export async function loadConfig(env = process.env) {
   const file = env.TERMBROWSE_CONFIG || paths(env).config;
   let raw = {};
@@ -29,7 +66,7 @@ export async function loadConfig(env = process.env) {
       throw new Error(`${file}: invalid TOML: ${err.message}`);
     }
   }
-  const { chrome = {}, agents = {}, hooks = {}, view = {} } = raw;
+  const { chrome = {}, agents = {}, hooks = {}, view = {}, keys = {}, control = {} } = raw;
   return {
     chrome: {
       channel: chrome.channel ?? 'stable',
@@ -43,6 +80,15 @@ export async function loadConfig(env = process.env) {
     view: {
       fillPane: parseBool(view.fill_pane ?? true, 'fill_pane', file),
       fillPaneForAgents: parseBool(view.fill_pane_for_agents ?? false, 'fill_pane_for_agents', file),
+    },
+    keys: {
+      prefix: inFile(file, 'prefix', parseKeySpec, keys.prefix ?? 'ctrl-]'),
+      giveBack: inFile(file, 'give_back', parseKeySpec, keys.give_back ?? 'g'),
+      quit: inFile(file, 'quit', parseKeySpec, keys.quit ?? 'q'),
+    },
+    control: {
+      idleReturnMs: inFile(file, 'idle_return', parseDuration, control.idle_return ?? '5m'),
+      maxWaitMs: inFile(file, 'max_wait', parseDuration, control.max_wait ?? '10m'),
     },
   };
 }

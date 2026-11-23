@@ -4,7 +4,7 @@ import { mkdtemp, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { paths } from '../src/paths.js';
-import { loadConfig, effectiveHeadless } from '../src/config.js';
+import { loadConfig, effectiveHeadless, parseKeySpec, parseDuration } from '../src/config.js';
 
 async function tmpFile(content) {
   const dir = await mkdtemp(join(tmpdir(), 'tb-'));
@@ -76,4 +76,47 @@ test('[chrome] background: default true, false honoured, non-boolean names the f
   assert.equal((await loadConfig({ TERMBROWSE_CONFIG: off })).chrome.background, false);
   const bad = await tmpFile('[chrome]\nbackground = "no"\n');
   await assert.rejects(loadConfig({ TERMBROWSE_CONFIG: bad }), (e) => e.message.includes(bad) && /background/.test(e.message));
+});
+
+test('[keys] and [control] defaults', async () => {
+  const cfg = await loadConfig({ TERMBROWSE_CONFIG: '/nonexistent.toml' });
+  assert.deepEqual(cfg.keys.prefix, { key: ']', ctrl: true, alt: false, label: 'Ctrl-]' });
+  assert.equal(cfg.keys.giveBack.key, 'g');
+  assert.equal(cfg.keys.quit.key, 'q');
+  assert.equal(cfg.control.idleReturnMs, 300000);
+  assert.equal(cfg.control.maxWaitMs, 600000);
+});
+
+test('reads [keys] and [control] from toml', async () => {
+  const file = await tmpFile('[keys]\nprefix = "alt-x"\ngive_back = "f2"\n[control]\nidle_return = "90s"\nmax_wait = "2h"\n');
+  const cfg = await loadConfig({ TERMBROWSE_CONFIG: file });
+  assert.equal(cfg.keys.prefix.label, 'Alt-x');
+  assert.equal(cfg.keys.giveBack.key, 'F2');
+  assert.equal(cfg.control.idleReturnMs, 90000);
+  assert.equal(cfg.control.maxWaitMs, 7200000);
+});
+
+test('parseKeySpec', () => {
+  assert.deepEqual(parseKeySpec('alt-x'), { key: 'x', ctrl: false, alt: true, label: 'Alt-x' });
+  assert.equal(parseKeySpec('f2').key, 'F2');
+  assert.equal(parseKeySpec('F12').key, 'F12');
+  assert.equal(parseKeySpec('ESCAPE').key, 'Escape');
+  for (const n of ['tab', 'enter', 'space']) assert.equal(parseKeySpec(n).ctrl, false);
+  assert.deepEqual(parseKeySpec('ctrl-]'), { key: ']', ctrl: true, alt: false, label: 'Ctrl-]' });
+  assert.throws(() => parseKeySpec('f13'));
+  assert.throws(() => parseKeySpec('ab'));
+});
+
+test('parseDuration', () => {
+  assert.equal(parseDuration('90s'), 90000);
+  assert.equal(parseDuration('2h'), 7200000);
+  assert.equal(parseDuration('5m'), 300000);
+  assert.throws(() => parseDuration('5 minutes'));
+});
+
+test('invalid key or duration names the file', async () => {
+  const a = await tmpFile('[keys]\nprefix = "ctrl-"\n');
+  await assert.rejects(loadConfig({ TERMBROWSE_CONFIG: a }), (err) => err.message.includes(a) && err.message.includes('prefix'));
+  const b = await tmpFile('[control]\nidle_return = "5 minutes"\n');
+  await assert.rejects(loadConfig({ TERMBROWSE_CONFIG: b }), (err) => err.message.includes(b) && err.message.includes('idle_return'));
 });
