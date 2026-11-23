@@ -68,6 +68,7 @@ export async function runMcp(extraArgs = [], { stdin = process.stdin, stdout = p
   const existing = await findEntry(id, p);
   const port = existing?.port ?? (await freePort());
   let chrome = null; // the Chrome this wrapper launched, while it is alive
+  const headless = effectiveHeadless(cfg, env);
 
   async function announce(c) {
     if (!cfg.hooks.onLaunch) return;
@@ -76,7 +77,7 @@ export async function runMcp(extraArgs = [], { stdin = process.stdin, stdout = p
       if (targets.some((t) => t.type === 'page')) break;
       await sleep(100);
     }
-    await runHook(cfg.hooks.onLaunch, { pid: c.pid, port: c.port, agent: id, kind: 'agent' });
+    await runHook(cfg.hooks.onLaunch, { pid: c.pid, port: c.port, agent: id, kind: 'agent', headless });
   }
 
   async function ensureChrome() {
@@ -87,7 +88,7 @@ export async function runMcp(extraArgs = [], { stdin = process.stdin, stdout = p
     const profileDir = await agentProfile(id, p);
     const c = await launchChrome({
       profileDir,
-      headless: effectiveHeadless(cfg, env),
+      headless,
       windowSize: cfg.chrome.windowSize,
       extraArgs: cfg.chrome.extraArgs,
       port,

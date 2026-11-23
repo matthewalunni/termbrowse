@@ -60,6 +60,7 @@ export async function runBrowse(
   const onStdoutError = () => {};
   stdout.on('error', onStdoutError);
 
+  const headless = effectiveHeadless(cfg, env);
   const agentId = `standalone-${pid}`;
   const profileDir = standaloneProfileDir(pid, p);
   try {
@@ -72,7 +73,7 @@ export async function runBrowse(
       chrome = await launchChrome({
         profileDir,
         url,
-        headless: effectiveHeadless(cfg, env),
+        headless,
         windowSize: cfg.chrome.windowSize,
         extraArgs: cfg.chrome.extraArgs,
         executablePath,
@@ -89,7 +90,7 @@ export async function runBrowse(
       p,
     ).catch((err) => stderr.write(`termbrowse: could not record Chrome in the registry: ${err.message}\n`));
     if (interrupted) return 130;
-    announce(cfg, chrome); // fire and forget: the viewer must not wait on a hook (runHook never rejects)
+    announce(cfg, chrome, headless); // fire and forget: the viewer must not wait on a hook (runHook never rejects)
     return await runViewer({
       port: chrome.port,
       stdin,
@@ -111,12 +112,12 @@ export async function runBrowse(
   }
 }
 
-async function announce(cfg, chrome) {
+async function announce(cfg, chrome, headless) {
   if (!cfg.hooks.onLaunch) return;
   for (let i = 0; i < 50; i++) {
     const targets = await listTargets(chrome.port).catch(() => []);
     if (targets.some((t) => t.type === 'page')) break;
     await sleep(100);
   }
-  await runHook(cfg.hooks.onLaunch, { pid: chrome.pid, port: chrome.port, agent: '', kind: 'standalone' });
+  await runHook(cfg.hooks.onLaunch, { pid: chrome.pid, port: chrome.port, agent: '', kind: 'standalone', headless });
 }

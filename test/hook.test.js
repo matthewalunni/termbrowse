@@ -19,6 +19,7 @@ async function withEnv(fn) {
   }
 }
 
+// bundleId() is '' off macOS, so the expected line has no trailing space there either.
 test('runHook passes TERMBROWSE_* env to the command', async () => {
   await withEnv(async (dir) => {
     const out = join(dir, 'out.txt');
@@ -26,15 +27,16 @@ test('runHook passes TERMBROWSE_* env to the command', async () => {
     process.env.OUT = out;
     try {
       await runHook(
-        'echo "$TERMBROWSE_PID $TERMBROWSE_PORT $TERMBROWSE_AGENT $TERMBROWSE_KIND $TERMBROWSE_BUNDLE_ID" > "$OUT"',
-        { pid: 123, port: 9000, agent: 't2p', kind: 'agent' },
+        'echo "$TERMBROWSE_PID $TERMBROWSE_PORT $TERMBROWSE_AGENT $TERMBROWSE_KIND $TERMBROWSE_HEADLESS $TERMBROWSE_BUNDLE_ID" > "$OUT"',
+        { pid: 123, port: 9000, agent: 't2p', kind: 'agent', headless: true },
       );
+      assert.equal((await readFile(out, 'utf8')).trim(), `123 9000 t2p agent 1 ${bundleId()}`.trim());
+      await runHook('echo "$TERMBROWSE_HEADLESS" > "$OUT"', { pid: 1, port: 2, agent: '', kind: 'standalone', headless: false });
+      assert.equal((await readFile(out, 'utf8')).trim(), '0');
     } finally {
       if (saved === undefined) delete process.env.OUT;
       else process.env.OUT = saved;
     }
-    // bundleId() is '' off macOS, so the expected line has no trailing space there either.
-    assert.equal((await readFile(out, 'utf8')).trim(), `123 9000 t2p agent ${bundleId()}`.trim());
   });
 });
 

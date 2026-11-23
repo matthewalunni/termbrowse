@@ -86,12 +86,14 @@ export async function runLogin(
   exited.then(() => emit('exited'));
   let polling = true;
   (async () => {
+    let seenPage = false; // a Chrome still starting may list no pages yet
     while (polling) {
       await sleep(POLL_MS);
       if (!polling) break;
       // On macOS closing the last window leaves Chrome running, so "closed" means no pages left.
       const pages = await listTargets(chrome.port).then((t) => t.filter((x) => x.type === 'page').length, () => null);
-      if (pages === 0) { emit('closed'); break; }
+      if (pages > 0) seenPage = true;
+      if (pages === 0 && seenPage) { emit('closed'); break; }
     }
   })();
   const wasFlowing = stdin.readableFlowing === true;
