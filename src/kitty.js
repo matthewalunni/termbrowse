@@ -23,6 +23,11 @@ export function deleteAll() {
   return `${ESC}_Ga=d,d=A,q=2${ESC}\\`;
 }
 
+// Deletes one image by id, freeing its data (uppercase I).
+export function deleteImage(id) {
+  return `${ESC}_Ga=d,d=I,i=${id},q=2${ESC}\\`;
+}
+
 export function enterScreen() {
   return `${ESC}[?1049h${ESC}[?25l${ESC}[2J${ESC}[H`;
 }

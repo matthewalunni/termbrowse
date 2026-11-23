@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { pngSize, encodeFrame, deleteAll, enterScreen, leaveScreen, kittyQuery, parseKittyReply } from '../src/kitty.js';
+import { pngSize, encodeFrame, deleteAll, deleteImage, enterScreen, leaveScreen, kittyQuery, parseKittyReply } from '../src/kitty.js';
 
 const ONE = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==';
 const ESC = '\x1b';
@@ -38,4 +38,9 @@ test('kitty query and reply parsing', () => {
   assert.equal(parseKittyReply(`${ESC}_Gi=31;OK${ESC}\\${ESC}[?62;c`), true);
   assert.equal(parseKittyReply(`${ESC}[?62;c`), false);
   assert.equal(parseKittyReply(''), null);
+});
+
+test('deleteImage deletes one image by id, freeing its data', () => {
+  assert.equal(deleteImage(2), `${ESC}_Ga=d,d=I,i=2,q=2${ESC}\\`);
+  assert.equal(deleteImage(1), `${ESC}_Ga=d,d=I,i=1,q=2${ESC}\\`);
 });

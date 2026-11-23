@@ -1,5 +1,5 @@
 // Live viewer: draws one Chrome tab's screencast into the terminal with Kitty graphics.
-import { pngSize, encodeFrame, deleteAll, enterScreen, leaveScreen } from './kitty.js';
+import { pngSize, encodeFrame, deleteAll, deleteImage, enterScreen, leaveScreen } from './kitty.js';
 import { fit, screencastSize, saneSize } from './layout.js';
 import { listTargets, browserVersion, pickTarget, CdpSession } from './cdp.js';
 import { termSize, detectKitty } from './tty.js';
@@ -96,6 +96,7 @@ export async function runViewer({
   let lastFrameAt = 0; // when the last frame arrived (Chrome sends none while the page is still)
   let filled = null; // the page session the size override was set on
   let repaint = false; // the pane changed size: clear it together with the next frame drawn
+  let shownId = null; // image id on screen (frames alternate 1 and 2); null when nothing is drawn
   const received = []; // {t, size} for frames received in the last second
   const drawn = []; // timestamps of frames drawn in the last second
   let resolveRun;
@@ -165,15 +166,19 @@ export async function runViewer({
     if (paused || busy) return;
     let frame;
     try {
-      frame = encodeFrame(data, fit(pngSize(data), term));
+      frame = encodeFrame(data, fit(pngSize(data), term), shownId === 1 ? 2 : 1);
     } catch {
       return; // not a PNG we can read
     }
     drawn.push(now);
     status = statusText(`${drawn.length} fps`);
+    // Double buffer: the new image is placed under the other id before the old one is deleted,
+    // so the terminal never has a moment with no image.
     const clear = repaint ? `${deleteAll()}${ESC}[2J` : '';
+    const drop = !repaint && shownId !== null ? deleteImage(shownId) : '';
+    shownId = shownId === 1 ? 2 : 1;
     repaint = false;
-    if (!stdout.write(clear + frame + statusSeq(status))) {
+    if (!stdout.write(clear + frame + drop + statusSeq(status))) {
       busy = true;
       stdout.once('drain', () => { busy = false; });
     }
@@ -296,6 +301,7 @@ export async function runViewer({
       if (!saneSize(term)) {
         paused = true;
         repaint = false;
+        shownId = null;
         stdout.write(`${deleteAll()}${ESC}[2J`);
         await stopScreencast();
         setStatus('paused', true);

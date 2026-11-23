@@ -632,3 +632,53 @@ test('quitting leaves no viewer timers running', async () => {
   assert.equal(await p, 0);
   assert.ok(timers() <= before, `a timer outlives the viewer: ${before} before quit, ${timers()} after`);
 });
+
+// --- double buffering: alternate image ids so the old frame stays up until the new one is placed ---
+test('frames alternate image ids 1,2,1; the new image is placed before the previous one is deleted', async () => {
+  fake = await startFakeCdp();
+  const t = fakeTerm();
+  const { p } = start(t);
+  await until(() => methods(fake, 'Page.startScreencast').length === 1);
+  const writes = [];
+  const realWrite = t.stdout.write;
+  t.stdout.write = (chunk, ...rest) => { writes.push(String(chunk)); return realWrite(chunk, ...rest); };
+  for (let i = 1; i <= 3; i++) {
+    fake.send({ method: 'Page.screencastFrame', params: { data: fakePng(), sessionId: i, metadata: {} } });
+    await until(() => writes.filter((w) => w.includes('a=T,f=100')).length === i);
+  }
+  const frames = writes.filter((w) => w.includes('a=T,f=100'));
+  assert.deepEqual(frames.map((w) => /a=T,f=100,i=(\d),p=1/.exec(w)[1]), ['1', '2', '1']);
+  assert.ok(!frames[0].includes('a=d'), 'first frame deletes nothing');
+  assert.ok(!frames[0].includes(deleteAll()));
+  for (const [i, prev] of [[1, 1], [2, 2]]) {
+    const w = frames[i];
+    assert.ok(w.indexOf('a=T,f=100') < w.indexOf(`a=d,d=I,i=${prev}`), `frame ${i + 1} deletes image ${prev} after placing`);
+    assert.equal(count(w, 'a=d'), 1);
+    assert.ok(w.indexOf(`a=d,d=I,i=${prev}`) < w.indexOf(`${ESC}[40;1H`), 'status row still last');
+    assert.ok(w.endsWith(w.slice(w.indexOf(`${ESC}[40;1H`))) && /\x1b\[40;1H\x1b\[2K.* fps$/.test(w));
+  }
+  t.stdin.write('q');
+  assert.equal(await p, 0);
+  assert.ok(t.out().endsWith(leaveScreen()) && leaveScreen().includes(deleteAll()), 'exit clears every image');
+});
+
+test('after a resize repaint everything is cleared and the next frame starts clean', async () => {
+  fake = await startFakeCdp();
+  const t = fakeTerm();
+  const { p } = start(t);
+  await until(() => methods(fake, 'Page.startScreencast').length === 1);
+  const send = (id) => fake.send({ method: 'Page.screencastFrame', params: { data: fakePng(), sessionId: id, metadata: {} } });
+  send(1);
+  await until(() => count(t.out(), 'a=T,f=100') === 1);
+  Object.assign(t.size, { cols: 80, rows: 25, pxW: 800, pxH: 500 });
+  t.signals.emit('SIGWINCH');
+  await until(() => methods(fake, 'Page.startScreencast').length === 2);
+  const from = t.out().length;
+  send(2);
+  await until(() => t.out().slice(from).includes('a=T,f=100'));
+  const w = t.out().slice(from);
+  assert.ok(w.indexOf(deleteAll()) < w.indexOf('a=T,f=100'), 'repaint clears all first');
+  assert.ok(!w.includes('a=d,d=I'), 'no per-image delete right after a full clear');
+  t.stdin.write('q');
+  assert.equal(await p, 0);
+});
