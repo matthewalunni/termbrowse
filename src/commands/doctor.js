@@ -1,6 +1,7 @@
 // `termbrowse doctor`: one line per check, ok / warn / fail; exit 1 if anything fails.
 import { execFile } from 'node:child_process';
-import { join } from 'node:path';
+import { access, constants, stat } from 'node:fs/promises';
+import { delimiter, join } from 'node:path';
 import { promisify } from 'node:util';
 import { Browser, getInstalledBrowsers } from '@puppeteer/browsers';
 import { paths } from '../paths.js';
@@ -92,6 +93,23 @@ async function checkKitty(stdin, stdout, env) {
   return ['warn', 'no answer to the query, so the viewer will refuse to draw here; if this terminal does draw Kitty graphics, set TERMBROWSE_ASSUME_KITTY=1'];
 }
 
+// The Claude Code plugin's MCP server runs the bare command `termbrowse`, so it has to resolve
+// on PATH: the first PATH entry holding an executable file of that name, as a shell would find it.
+export async function checkOnPath(env) {
+  for (const dir of (env.PATH ?? '').split(delimiter)) {
+    if (!dir) continue;
+    const file = join(dir, 'termbrowse');
+    try {
+      if (!(await stat(file)).isFile()) continue;
+      await access(file, constants.X_OK);
+      return ['ok', file];
+    } catch {
+      // not here; keep looking
+    }
+  }
+  return ['warn', 'the Claude Code plugin runs `termbrowse` from PATH — install with npm i -g or npm link'];
+}
+
 export async function runDoctor(
   args,
   { stdin = process.stdin, stdout = process.stdout, env = process.env, platform = process.platform } = {},
@@ -126,6 +144,7 @@ export async function runDoctor(
     if (chrome.executablePath) add('Chrome libraries (ldd)', await checkLdd(chrome.executablePath));
   }
 
+  add('termbrowse on PATH', await checkOnPath(env));
   add('Kitty graphics', await checkKitty(stdin, stdout, env));
   return lines.includes('fail') ? 1 : 0;
 }
