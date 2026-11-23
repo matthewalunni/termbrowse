@@ -7,7 +7,10 @@ const MARKER = '.termbrowse-last-used';
 const SKIP_FILES = new Set(['SingletonLock', 'SingletonSocket', 'SingletonCookie', 'DevToolsActivePort', 'lockfile']);
 const SKIP_DIRS = new Set(['Cache', 'Code Cache', 'GPUCache']);
 
-const sanitize = (id) => String(id).replace(/[^A-Za-z0-9._-]/g, '_');
+const sanitize = (id) => {
+  const s = String(id).replace(/[^A-Za-z0-9._-]/g, '_');
+  return s === '' || s === '.' || s === '..' ? '_' : s;
+};
 
 async function copyFilter(src) {
   const name = path.basename(src);

@@ -75,3 +75,14 @@ test('pruneProfiles removes only stale, non-live profiles', async () => {
 test('pruneProfiles with no profiles dir returns []', async () => {
   assert.deepEqual(await pruneProfiles(7, await tmpPaths()), []);
 });
+
+test('empty, "." and ".." ids stay strictly inside profiles', async () => {
+  const p = await tmpPaths();
+  for (const id of ['', '.', '..']) {
+    const dir = await agentProfile(id, p);
+    assert.equal(path.dirname(dir), p.profiles, JSON.stringify(id));
+    assert.notEqual(dir, p.profiles);
+  }
+  assert.equal(await exists(path.join(p.state, '.termbrowse-last-used')), false);
+  assert.equal(await exists(path.join(p.profiles, '.termbrowse-last-used')), false);
+});

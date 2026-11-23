@@ -17,22 +17,23 @@ function alive(pid) {
   }
 }
 
-async function load(p) {
+// Returns { list, corrupt }. With quarantine (only valid under the lock), a corrupt
+// file is moved aside so it is kept once and the registry starts clean.
+async function load(p, quarantine = false) {
   let text;
   try {
     text = await fs.readFile(p.registry, 'utf8');
   } catch (e) {
-    if (e.code === 'ENOENT') return [];
+    if (e.code === 'ENOENT') return { list: [], corrupt: false };
     throw e;
   }
   try {
     const data = JSON.parse(text);
     if (!Array.isArray(data)) throw new Error('not an array');
-    return data;
+    return { list: data, corrupt: false };
   } catch {
-    // Keep what was there rather than silently discarding it.
-    await fs.writeFile(`${p.registry}.corrupt-${Date.now()}`, text).catch(() => {});
-    return [];
+    if (quarantine) await fs.rename(p.registry, `${p.registry}.corrupt-${Date.now()}`).catch(() => {});
+    return { list: [], corrupt: true };
   }
 }
 
@@ -71,17 +72,17 @@ async function withLock(p, fn) {
 
 const modify = (p, change) =>
   withLock(p, async () => {
-    const list = await load(p);
+    const { list } = await load(p, true);
     await save(change(list), p);
   });
 
 export async function readRegistry(p = paths()) {
-  const list = await load(p);
+  const { list, corrupt } = await load(p);
   const live = list.filter((e) => alive(e.pid));
-  if (live.length === list.length) return live;
+  if (!corrupt && live.length === list.length) return live;
   // Re-read under the lock so a concurrent upsert is not overwritten.
   await modify(p, (cur) => cur.filter((e) => alive(e.pid)));
-  return load(p);
+  return (await load(p)).list;
 }
 
 export const upsertEntry = (e, p = paths()) =>

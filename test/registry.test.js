@@ -90,3 +90,15 @@ test('a fresh lock is respected until released', async () => {
   await pr;
   assert.equal(done, true);
 });
+
+test('repeated reads of a corrupt registry keep exactly one copy', async () => {
+  const p = await tmpPaths();
+  await fs.writeFile(p.registry, '{not json');
+  for (let i = 0; i < 4; i++) {
+    assert.deepEqual(await readRegistry(p), []);
+    assert.equal(await findEntry('x', p), null);
+  }
+  const copies = (await fs.readdir(p.state)).filter((f) => f.includes('.corrupt-'));
+  assert.equal(copies.length, 1);
+  assert.deepEqual(await readRegistry(p), []);
+});
