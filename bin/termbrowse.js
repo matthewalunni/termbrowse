@@ -1,6 +1,12 @@
 #!/usr/bin/env node
 import { readFile } from 'node:fs/promises';
 
+// Before anything else is loaded: the commands need Node 22 (global WebSocket, fs.cp, ...).
+if (Number(process.versions.node.split('.')[0]) < 22) {
+  process.stderr.write(`termbrowse: needs Node 22 or newer (this is ${process.versions.node})\n`);
+  process.exit(1);
+}
+
 const USAGE = `Usage: termbrowse <url>
        termbrowse view (--port N | --agent ID) [--tab MATCH]
        termbrowse mcp [-- extra chrome-devtools-mcp args]
@@ -43,6 +49,11 @@ async function main(argv) {
   }
   if (first.startsWith('-')) {
     process.stderr.write(`termbrowse: unknown option ${first}\n${USAGE}`);
+    return 2;
+  }
+  // A bare word that can't be a URL is a mistyped command (`termbrowse agnets`), not a site.
+  if (!Object.hasOwn(COMMANDS, first) && !/[.:/]/.test(first) && first.toLowerCase() !== 'localhost') {
+    process.stderr.write(`termbrowse: unknown command ${first}\n${USAGE}`);
     return 2;
   }
   const { UsageError } = await import('../src/commands/usage.js');

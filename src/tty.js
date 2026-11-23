@@ -62,6 +62,7 @@ export async function termSize(stdin, stdout, timeoutMs = 800) {
 }
 
 // Terminals known to draw Kitty graphics, some of which (Herdr) don't answer the query.
+// Not WezTerm: its Kitty graphics are off by default, and when on it answers the query.
 // Returns what identified it (an env var, or TERM=/TERM_PROGRAM=<value>), else null.
 export function kittyTerminalName(env = process.env) {
   if (env.TERMBROWSE_ASSUME_KITTY === '1') return 'TERMBROWSE_ASSUME_KITTY';
@@ -70,7 +71,7 @@ export function kittyTerminalName(env = process.env) {
   const term = (env.TERM ?? '').toLowerCase();
   if (term === 'xterm-kitty' || term === 'xterm-ghostty') return `TERM=${env.TERM}`;
   const program = (env.TERM_PROGRAM ?? '').toLowerCase();
-  if (program === 'ghostty' || program === 'wezterm') return `TERM_PROGRAM=${env.TERM_PROGRAM}`;
+  if (program === 'ghostty') return `TERM_PROGRAM=${env.TERM_PROGRAM}`;
   return null;
 }
 

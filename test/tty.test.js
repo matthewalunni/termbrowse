@@ -114,9 +114,9 @@ test('knownKittyTerminal recognises terminals that draw Kitty graphics', () => {
     { TERM: 'xterm-kitty' },
     { TERM: 'XTERM-GHOSTTY' },
     { TERM_PROGRAM: 'ghostty' },
-    { TERM_PROGRAM: 'WezTerm' },
-    { TERM_PROGRAM: 'wezterm' },
   ]) assert.equal(knownKittyTerminal(env), true, JSON.stringify(env));
+  // WezTerm's Kitty graphics are off by default; when on, it answers the query.
+  assert.equal(knownKittyTerminal({ TERM_PROGRAM: 'WezTerm' }), false);
   assert.equal(knownKittyTerminal({ TERM: 'xterm-256color' }), false);
   assert.equal(knownKittyTerminal({ TERMBROWSE_ASSUME_KITTY: '0' }), false);
   assert.equal(knownKittyTerminal({}), false);

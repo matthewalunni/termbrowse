@@ -209,6 +209,27 @@ test('a bare argument is a URL to browse (refused here: not a terminal, before a
   assert.deepEqual(await readRegistry(p), []);
 });
 
+test('a bare word that cannot be a URL is an unknown command, not a page to open', async () => {
+  const r = await run(['agnets']);
+  assert.equal(r.code, 2);
+  assert.match(r.stderr, /^termbrowse: unknown command agnets\n/);
+  assert.match(r.stderr, /Usage/);
+  // localhost is a URL (refused here only because this is not a terminal)
+  assert.match((await run(['localhost'])).stderr, /doesn't support Kitty graphics/);
+});
+
+test('Node older than 22 is refused with a clear message', async () => {
+  const fake = "data:text/javascript,Object.defineProperty(process.versions,'node',{value:'20.19.2'})";
+  const r = await new Promise((resolve) => {
+    const child = spawn(process.execPath, ['--import', fake, BIN, 'agents'], { env, stdio: ['ignore', 'pipe', 'pipe'] });
+    let stderr = '';
+    child.stderr.on('data', (d) => (stderr += d));
+    child.on('exit', (code) => resolve({ code, stderr }));
+  });
+  assert.equal(r.code, 1);
+  assert.equal(r.stderr, 'termbrowse: needs Node 22 or newer (this is 20.19.2)\n');
+});
+
 test('unknown options and extra arguments after the URL are usage errors', async () => {
   assert.equal((await run(['--bogus'])).code, 2);
   assert.equal((await run(['example.com', 'more'])).code, 2);
@@ -360,6 +381,38 @@ test('login: Ctrl-C while saving asks once more; a second quits at once with a w
   assert.ok(Date.now() - t0 < 10_000);
   assert.match(l.err(), /recent sign-ins may not be saved/);
   assert.equal(await browserVersion(port), null);
+});
+
+test('login: a first poll with no pages yet is not a closed browser', { timeout: 60_000 }, async () => {
+  // A stand-in Chrome: no pages for two polls (still starting), then one, then none; it quits
+  // after the last answer. listCount records how many polls it answered.
+  const countFile = join(tmp, 'login-polls');
+  const exe = join(tmp, 'slow-start-chrome.mjs');
+  await writeFile(exe, `#!${process.execPath}
+import http from 'node:http';
+import { writeFileSync } from 'node:fs';
+const port = Number(process.argv.find((a) => a.startsWith('--remote-debugging-port=')).split('=')[1]);
+const plan = [[], [], [{ id: 'P', type: 'page', url: 'about:blank' }], [{ id: 'P', type: 'page', url: 'about:blank' }], []];
+let n = 0;
+http.createServer((q, r) => {
+  if (q.url !== '/json/list') return r.end('{"Browser":"fake"}');
+  const answer = plan[Math.min(n, plan.length - 1)];
+  n++;
+  writeFileSync(${JSON.stringify(countFile)}, String(n));
+  r.end(JSON.stringify(answer));
+  if (n === plan.length) setTimeout(() => process.exit(0), 50);
+}).listen(port, '127.0.0.1');
+`);
+  await import('node:fs/promises').then((m) => m.chmod(exe, 0o755));
+  const stdin = new PassThrough();
+  const stdout = new PassThrough();
+  let out = '';
+  stdout.on('data', (d) => (out += d));
+  const loginEnv = process.platform === 'linux' && !env.DISPLAY && !env.WAYLAND_DISPLAY ? { ...env, DISPLAY: ':0' } : env;
+  const code = await runLogin([], { stdin, stdout, stderr: new PassThrough(), env: loginEnv, signals: new EventEmitter(), saveDelayMs: 0, chromeOptions: { headless: true, executablePath: exe } });
+  assert.equal(code, 0);
+  assert.equal(Number(await readFile(countFile, 'utf8')), 5, 'kept polling past the empty first answers');
+  assert.match(out, /Saving your sign-ins…/);
 });
 
 test('no arguments prints usage and exits 2', async () => {
