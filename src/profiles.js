@@ -63,7 +63,25 @@ export async function profileFromStarter(dir, p = paths()) {
   return dir;
 }
 
+const CHROME_LOG = /^chrome-(?:starting-\d+-\d+|(\d+))\.log$/;
+const TMP_COPY = /\.tmp-\d+-\d+$/; // profileFromStarter's copy in progress
+const TMP_COPY_STALE_MS = 3600_000;
+
+// Chrome's logs (chrome-<pid>.log, chrome-starting-<pid>-<port>.log) unchanged for `days`,
+// unless that Chrome still runs.
+async function pruneLogs(days, p, now) {
+  const names = await fs.readdir(p.logs).catch(() => []);
+  for (const name of names) {
+    const m = CHROME_LOG.exec(name);
+    if (!m || (m[1] && pidAlive(Number(m[1])))) continue;
+    const file = path.join(p.logs, name);
+    const st = await fs.stat(file).catch(() => null);
+    if (st && now - st.mtimeMs > days * 86400_000) await fs.rm(file, { force: true });
+  }
+}
+
 export async function pruneProfiles(days, p = paths(), now = Date.now()) {
+  await pruneLogs(days, p, now);
   let names;
   try {
     names = await fs.readdir(p.profiles);
@@ -74,6 +92,12 @@ export async function pruneProfiles(days, p = paths(), now = Date.now()) {
   const liveIds = new Set((await readRegistry(p)).map((e) => sanitize(e.agentId)));
   const removed = [];
   for (const id of names) {
+    if (TMP_COPY.test(id)) {
+      // Left by a copy that was killed midway; a copy still running is younger than this.
+      const st = await fs.stat(path.join(p.profiles, id)).catch(() => null);
+      if (st && now - st.mtimeMs > TMP_COPY_STALE_MS) await fs.rm(path.join(p.profiles, id), { recursive: true, force: true });
+      continue;
+    }
     if (liveIds.has(id)) continue;
     const owner = PID_NAMED.exec(id);
     if (owner && !pidAlive(Number(owner[1]))) {

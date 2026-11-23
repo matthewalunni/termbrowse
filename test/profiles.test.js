@@ -148,3 +148,41 @@ test('the state and profiles dirs are created private (0700), also when they alr
   assert.equal((await fs.stat(p.state)).mode & 0o777, 0o700);
   assert.equal((await fs.stat(p.profiles)).mode & 0o777, 0o700);
 });
+
+test('pruneProfiles also deletes Chrome logs older than prune_days', async () => {
+  const p = await tmpPaths();
+  const now = Date.now();
+  await fs.mkdir(p.logs, { recursive: true });
+  const make = async (name, days) => {
+    const f = path.join(p.logs, name);
+    await fs.writeFile(f, 'x');
+    const t = new Date(now - days * 86400_000);
+    await fs.utimes(f, t, t);
+    return f;
+  };
+  const oldLog = await make('chrome-999999.log', 8);
+  const oldStarting = await make('chrome-starting-1-9222.log', 8);
+  const freshLog = await make('chrome-1234.log', 1);
+  const other = await make('notes.log', 30);
+  await pruneProfiles(7, p, now);
+  assert.equal(await exists(oldLog), false);
+  assert.equal(await exists(oldStarting), false);
+  assert.equal(await exists(freshLog), true);
+  assert.equal(await exists(other), true, 'only chrome logs are pruned');
+});
+
+test('pruneProfiles sweeps profile .tmp- copies older than an hour', async () => {
+  const p = await tmpPaths();
+  const now = Date.now();
+  await agentProfile('keep', p);
+  const oldTmp = path.join(p.profiles, 'agent1.tmp-4242-1');
+  const newTmp = path.join(p.profiles, 'agent2.tmp-4242-2');
+  await fs.mkdir(path.join(oldTmp, 'Default'), { recursive: true });
+  await fs.mkdir(newTmp, { recursive: true });
+  const t = new Date(now - 2 * 3600_000);
+  await fs.utimes(oldTmp, t, t);
+  await pruneProfiles(7, p, now);
+  assert.equal(await exists(oldTmp), false);
+  assert.equal(await exists(newTmp), true, 'a copy in progress is left alone');
+  assert.equal(await exists(path.join(p.profiles, 'keep')), true);
+});
