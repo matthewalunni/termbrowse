@@ -607,9 +607,26 @@ test('followable: web pages and the new-tab page, not prerenders, extensions or 
   assert.equal(followable({ type: 'page', url: 'https://a.example/' }), true);
   assert.equal(followable({ type: 'page', url: 'about:blank' }), true);
   assert.equal(followable({ type: 'page', url: 'chrome://newtab/' }), true);
+  assert.equal(followable({ type: 'page', url: 'chrome://newtab' }), true);
+  assert.equal(followable({ type: 'page', url: 'chrome://new-tab-page/' }), true);
+  assert.equal(followable({ type: 'page', url: 'chrome://newtab-footer/' }), false);
+  assert.equal(followable({ type: 'page', url: 'chrome://new-tab-page-third-party/' }), false);
   assert.equal(followable({ type: 'page', subtype: 'prerender', url: 'https://a.example/' }), false);
   assert.equal(followable({ type: 'page', url: 'chrome://settings/' }), false);
   assert.equal(followable({ type: 'page', url: 'chrome-extension://x/p.html' }), false);
   assert.equal(followable({ type: 'page', url: 'devtools://devtools/x' }), false);
   assert.equal(followable({ type: 'service_worker', url: 'https://a.example/sw.js' }), false);
+});
+
+test('quitting leaves no viewer timers running', async () => {
+  fake = await startFakeCdp();
+  const t = fakeTerm();
+  const timers = () => process.getActiveResourcesInfo().filter((r) => r === 'Timeout').length;
+  const { p } = start(t);
+  await until(() => methods(fake, 'Page.startScreencast').length === 1);
+  await new Promise((r) => setTimeout(r, 20)); // let until()'s own timer finish
+  const before = timers(); // ref'd timers only (the status ticker is unref'd)
+  t.stdin.write('q');
+  assert.equal(await p, 0);
+  assert.ok(timers() <= before, `a timer outlives the viewer: ${before} before quit, ${timers()} after`);
 });

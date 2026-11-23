@@ -32,11 +32,21 @@ export function followable(info) {
   if (info?.type !== 'page' || info.subtype) return false;
   const url = info.url ?? '';
   if (/^(chrome-extension|devtools):/i.test(url)) return false;
-  if (/^chrome:/i.test(url)) return /^chrome:\/\/newtab\b/i.test(url);
+  if (/^chrome:/i.test(url)) return /^chrome:\/\/(newtab|new-tab-page)\/?$/i.test(url);
   return true;
 }
 
 const RESIZE_DEBOUNCE_MS = 150;
+
+// Waits for promise, at most ms; the timer is cleared either way, so it never holds the process open.
+async function within(promise, ms) {
+  let timer;
+  try {
+    return await Promise.race([promise, new Promise((r) => { timer = setTimeout(r, ms); })]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
 
 export async function runViewer({
   port,
@@ -128,14 +138,7 @@ export async function runViewer({
     if (closing) await clearOverride(session);
   };
   // Best effort, never throws, at most 500 ms.
-  const clearOverride = async (session) => {
-    let timer;
-    await Promise.race([
-      session.send('Emulation.clearDeviceMetricsOverride').catch(() => {}),
-      new Promise((r) => { timer = setTimeout(r, 500); timer.unref?.(); }),
-    ]);
-    clearTimeout(timer);
-  };
+  const clearOverride = (session) => within(session.send('Emulation.clearDeviceMetricsOverride').catch(() => {}), 500);
   const clearFill = async () => {
     const session = filled;
     filled = null;
@@ -192,9 +195,9 @@ export async function runViewer({
     stdin.removeListener('data', onKey);
     for (const [sig, fn] of sigHandlers) signals.removeListener(sig, fn);
     // A size query in flight puts raw mode back as it found it when it ends: let it end first.
-    await Promise.race([resizing, new Promise((r) => setTimeout(r, 1000))]);
+    await within(resizing, 1000);
     if (code === 0) {
-      await Promise.race([Promise.all([stopScreencast(), clearFill()]), new Promise((r) => setTimeout(r, 500))]);
+      await within(Promise.all([stopScreencast(), clearFill()]), 500);
     } else {
       setStatus('disconnected', true);
       await Promise.all([clearFill(), new Promise((r) => setTimeout(r, 1000))]);
