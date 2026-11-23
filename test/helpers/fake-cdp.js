@@ -35,9 +35,9 @@ export async function startFakeCdp({ handlers = {}, targets } = {}) {
       const handler = handlers[msg.method];
       try {
         const result = handler ? await handler(msg.params, msg) : {};
-        ws.send(JSON.stringify({ id: msg.id, result }));
+        if (ws.readyState === ws.OPEN) ws.send(JSON.stringify({ id: msg.id, result }));
       } catch (err) {
-        ws.send(JSON.stringify({ id: msg.id, error: { code: -32000, message: err.message } }));
+        if (ws.readyState === ws.OPEN) ws.send(JSON.stringify({ id: msg.id, error: { code: -32000, message: err.message } }));
       }
     });
   });

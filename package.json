@@ -7,7 +7,7 @@
   "private": true,
   "bin": { "termbrowse": "bin/termbrowse.js" },
   "engines": { "node": ">=22" },
-  "scripts": { "test": "node --test" },
+  "scripts": { "test": "node --test 'test/**/*.test.js'" },
   "dependencies": {
     "@puppeteer/browsers": "^3.2.7",
     "chrome-devtools-mcp": "1.13.0",

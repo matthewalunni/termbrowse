@@ -3,14 +3,14 @@
 const base = (port) => `http://127.0.0.1:${port}`;
 
 export async function listTargets(port) {
-  const res = await fetch(`${base(port)}/json/list`);
+  const res = await fetch(`${base(port)}/json/list`, { signal: AbortSignal.timeout(2000) });
   if (!res.ok) throw new Error(`GET /json/list failed: HTTP ${res.status}`);
   return res.json();
 }
 
 export async function browserVersion(port) {
   try {
-    const res = await fetch(`${base(port)}/json/version`);
+    const res = await fetch(`${base(port)}/json/version`, { signal: AbortSignal.timeout(2000) });
     if (!res.ok) return null;
     return await res.json();
   } catch {

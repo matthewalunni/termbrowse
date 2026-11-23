@@ -100,3 +100,16 @@ test('pickTarget prefers a match, skips non-pages, falls back to first page', ()
   assert.equal(pickTarget([targets[0]]), null);
   assert.equal(pickTarget([]), null);
 });
+
+test('waitForPort does not hang on a port that accepts but never answers', async () => {
+  const srv = net.createServer(() => {});
+  await new Promise((r) => srv.listen(0, '127.0.0.1', r));
+  const started = Date.now();
+  try {
+    await assert.rejects(waitForPort(srv.address().port, 500), /did not open/);
+    assert.ok(Date.now() - started < 4500);
+  } finally {
+    srv.closeAllConnections?.();
+    srv.close();
+  }
+});
