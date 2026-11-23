@@ -163,6 +163,8 @@ By default the viewer draws the page at the browser's own window size, scaled do
 
 Warning: with `fill_pane_for_agents = true`, an agent's page takes your pane's size while you watch it. Its layout, and the screenshots the agent takes, then depend on the size of your pane.
 
+Two viewers on the same page (say `view --agent a1` in two panes) share one size override, because Chrome keeps one per page: the viewer that set it last wins, and the other draws the page at that size, scaled to fit. When either viewer quits it removes the override for both, and the one still open sets it again on its next resize.
+
 ## Terminal support
 
 The viewer needs the Kitty graphics protocol. Before drawing, termbrowse checks the terminal:
@@ -202,7 +204,7 @@ The image is drawn at the pane's real pixel size (1×, never Retina 2×) from PN
 termbrowse was checked on a headless Debian 13 (trixie) x86_64 machine (Herdr's `dev`):
 
 - Node: Debian's `/usr/bin/node` is 20.19.2, which is too old. `doctor` reports `Node: fail (20.19.2; termbrowse needs 22 or newer)`. Use Node 22 or newer from nvm, NodeSource or similar. The check used Node 26.13.1 from nvm.
-- Chrome libraries: a minimal Debian lacks the shared libraries Chrome needs. `doctor` lists the missing ones from `ldd`. On Debian 13 they were:
+- Chrome libraries: a minimal Debian lacks the shared libraries Chrome needs. `doctor` lists the missing ones from `ldd`, followed by the `sudo apt install` line for the packages that provide them (Debian 13 / Ubuntu 24.04 names; any library it has no package for is named as-is). On Debian 13 they were:
 
   ```sh
   sudo apt-get install --no-install-recommends libnspr4 libnss3 libatk1.0-0t64 \
