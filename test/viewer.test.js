@@ -997,6 +997,39 @@ test('interactive: taking control while the agent is acting says so for a moment
   assert.equal(await p, 0);
 });
 
+test('interactive: a failed take of control is shown and never claimed', async () => {
+  const home = await tmpHome();
+  const state = paths({ HOME: home }).state;
+  await fs.mkdir(path.dirname(state), { recursive: true });
+  await fs.writeFile(state, 'not a directory'); // every control-file write fails
+  const { t, p } = await startInteractive(agentOpts(home));
+  click(t, 10, 5);
+  await until(() => mouse().length === 2, 3000);
+  await until(() => t.out().includes("couldn't take control: "));
+  assert.ok(!t.out().includes('you have control'));
+  t.stdin.write(`${ESC}[<35;12;6M`); // not holding: hover is not forwarded
+  await sleep(100);
+  assert.equal(mouse().length, 2);
+  await sleep(3100); // the message passes; back to the agent status
+  assert.match(t.out().slice(t.out().lastIndexOf(`${ESC}[40;1H`)), /agent · https:\/\/example\.com\/ · /);
+  t.signals.emit('SIGTERM');
+  assert.equal(await p, 0);
+});
+
+test('interactive: a failed hand back is shown', async () => {
+  const home = await tmpHome();
+  const p0 = paths({ HOME: home });
+  const { t, p } = await startInteractive(agentOpts(home));
+  click(t, 10, 5);
+  await until(() => t.out().includes('you have control'));
+  await fs.rm(p0.profiles, { recursive: true });
+  await fs.writeFile(p0.profiles, 'not a directory'); // the locked write fails from now on
+  t.stdin.write('\x1dg');
+  await until(() => t.out().includes("couldn't hand back control: "));
+  t.signals.emit('SIGTERM');
+  assert.equal(await p, 0);
+});
+
 test('interactive: a click in the same chunk as a size reply is still delivered', async () => {
   const { t, p } = await startInteractive();
   t.stdin.write(`${ESC}[6;37;17t${ESC}[<0;10;5M${ESC}[?62;c${ESC}[<0;10;5m`);

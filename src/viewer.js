@@ -56,6 +56,7 @@ const CLICK_MS = 400; // double/triple click window
 const HOVER_MS = 1000 / 30; // at most 30 pointer moves a second
 const TOUCH_MS = 1000; // refresh the control file's lastInput at most once a second
 const BUSY_NOTE_MS = 2000;
+const FAIL_NOTE_MS = 3000;
 const BUTTON_BITS = { left: 1, right: 2, middle: 4 };
 
 // Waits for promise, at most ms; the timer is cleared either way, so it never holds the process open.
@@ -131,8 +132,9 @@ export async function runViewer({
   let holding = false; // the user holds control of the agent's browser
   let lastTouch = 0;
   let idleTimer = null;
-  let busyNoteUntil = 0;
-  let busyNoteTimer = null;
+  let confirmed = false; // the control file says the user holds it (status says so only then)
+  let note = null; // {text, until}: a passing status message (agent was acting, a control failure)
+  let noteTimer = null;
   let lastClick = null; // {button, col, row, at, count}
   const pressed = new Set(); // mouse buttons down on the page
   let lastMoveAt = 0;
@@ -152,9 +154,9 @@ export async function runViewer({
 
   const statusText = (suffix) => {
     const width = Math.max(0, term.cols);
-    if (busyNoteUntil > Date.now()) return 'agent was acting…'.slice(0, width);
+    if (note && note.until > Date.now()) return note.text.slice(0, width);
     if (prefixTimer) return 'prefix…'.slice(0, width);
-    if (holding) return `you have control · ${keys.prefix.label} ${keys.giveBack.label} to hand back`.slice(0, width);
+    if (holding && confirmed) return `you have control · ${keys.prefix.label} ${keys.giveBack.label} to hand back`.slice(0, width);
     if (agentId) {
       const room = Math.max(0, width - suffix.length - 'agent ·  · '.length);
       return `agent · ${url.slice(0, room)} · ${suffix}`.slice(0, width);
@@ -256,15 +258,15 @@ export async function runViewer({
     closing = true;
     clearInterval(ticker);
     clearTimeout(resizeTimer);
-    for (const timer of [escTimer, prefixTimer, idleTimer, busyNoteTimer, moveTimer]) clearTimeout(timer);
+    for (const timer of [escTimer, prefixTimer, idleTimer, noteTimer, moveTimer]) clearTimeout(timer);
     prefixTimer = null;
-    busyNoteUntil = 0;
+    note = null;
     stdin.removeListener('data', onKey);
     for (const [sig, fn] of sigHandlers) signals.removeListener(sig, fn);
     // Hand the agent its browser back first, so it doesn't wait on the rest of the cleanup.
     if (holding) {
       holding = false;
-      queueControl(() => releaseControl(agentId, { url }, statePaths));
+      release(url);
     }
     // A size query in flight puts raw mode back as it found it when it ends: let it end first.
     await within(resizing, 1000);
@@ -400,11 +402,37 @@ export async function runViewer({
   const showStatus = () => { if (!closing) setStatus(paused ? 'paused' : fpsSuffix(), true); };
   const send = (method, params) => { page.send(method, params).catch(() => {}); };
 
+  // A passing status message, e.g. a control-file failure the user must not miss.
+  const flash = (text, ms) => {
+    if (closing) return;
+    note = { text, until: Date.now() + ms };
+    clearTimeout(noteTimer);
+    noteTimer = setTimeout(showStatus, ms + 10);
+    showStatus();
+  };
+
+  // Release in the file, retrying once; a failure is shown (the agent stays blocked until this
+  // viewer exits, when its dead pid releases it).
+  const release = (at) => queueControl(async () => {
+    try {
+      await releaseControl(agentId, { url: at }, statePaths);
+    } catch {
+      try {
+        await releaseControl(agentId, { url: at }, statePaths);
+      } catch (err) {
+        flash(`couldn't hand back control: ${err.message}`, FAIL_NOTE_MS);
+      }
+    }
+  });
+
+  let takeSeq = 0; // which take a result belongs to (a give-back may come before it lands)
   const giveBack = () => {
     clearTimeout(idleTimer);
     if (!holding) return;
     holding = false;
-    queueControl(() => releaseControl(agentId, { url }, statePaths));
+    confirmed = false;
+    takeSeq++;
+    release(url);
     showStatus();
   };
 
@@ -418,17 +446,27 @@ export async function runViewer({
     idleTimer = setTimeout(giveBack, idleReturnMs);
     if (!holding) {
       holding = true;
+      confirmed = false;
       lastTouch = now;
       const at = url;
+      const seq = ++takeSeq;
       queueControl(async () => {
-        await takeControl(agentId, { viewerPid: process.pid, url: at, idleReturnMs }, statePaths);
-        if (!(await readControl(agentId, statePaths)).agentBusySince || closing) return;
-        busyNoteUntil = Date.now() + BUSY_NOTE_MS;
-        clearTimeout(busyNoteTimer);
-        busyNoteTimer = setTimeout(showStatus, BUSY_NOTE_MS + 10);
-        showStatus();
+        try {
+          await takeControl(agentId, { viewerPid: process.pid, url: at, idleReturnMs }, statePaths);
+        } catch (err) {
+          // Never claim control the user doesn't have: the agent isn't blocked.
+          if (seq !== takeSeq) return;
+          holding = false;
+          clearTimeout(idleTimer);
+          flash(`couldn't take control: ${err.message}`, FAIL_NOTE_MS);
+          return;
+        }
+        if (seq !== takeSeq || closing) return;
+        confirmed = true;
+        const busy = (await readControl(agentId, statePaths).catch(() => ({}))).agentBusySince;
+        if (busy) flash('agent was acting…', BUSY_NOTE_MS);
+        else showStatus();
       });
-      showStatus();
     } else if (now - lastTouch >= TOUCH_MS) {
       lastTouch = now;
       queueControl(() => touchControl(agentId, statePaths));
