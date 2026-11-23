@@ -48,6 +48,8 @@ export async function launchChrome({
   extraArgs,
   port,
   executablePath,
+  startTimeoutMs = 15000,
+  killGraceMs = 3000,
 }) {
   const cfg = await loadConfig();
   headless ??= effectiveHeadless(cfg);
@@ -72,29 +74,35 @@ export async function launchChrome({
   await mkdir(logs, { recursive: true });
   const tmpLog = join(logs, `chrome-starting-${process.pid}-${port}.log`);
   const fh = await open(tmpLog, 'a');
-  let child;
-  try {
-    child = spawn(executablePath, args, { detached: true, stdio: ['ignore', fh.fd, fh.fd] });
-  } finally {
-    await fh.close();
-  }
+  // Attach listeners in the same tick as spawn: a spawn failure emits 'error' asynchronously.
+  const child = spawn(executablePath, args, { detached: true, stdio: ['ignore', fh.fd, fh.fd] });
   const exited = new Promise((resolve) => {
     child.once('exit', resolve);
-    child.once('error', resolve);
+    child.on('error', resolve);
   });
-  const spawnFailed = new Promise((_, reject) => child.once('error', reject));
+  const spawnFailed = new Promise((_, reject) => child.on('error', reject));
+  spawnFailed.catch(() => {}); // the race below observes it; avoid an unhandled rejection meanwhile
+  await fh.close();
   child.unref();
 
+  // The child leads its own process group (detached), so signal the group to reach helpers too.
+  const signal = (sig) => {
+    try {
+      process.kill(-child.pid, sig);
+    } catch {
+      child.kill(sig);
+    }
+  };
   const kill = async () => {
-    if (child.exitCode !== null || child.signalCode !== null) return;
-    child.kill('SIGTERM');
-    const timer = setTimeout(() => child.kill('SIGKILL'), 3000);
+    if (child.pid === undefined || child.exitCode !== null || child.signalCode !== null) return;
+    signal('SIGTERM');
+    const timer = setTimeout(() => signal('SIGKILL'), killGraceMs);
     await exited;
     clearTimeout(timer);
   };
 
   try {
-    await Promise.race([spawnFailed, waitForPort(port)]);
+    await Promise.race([spawnFailed, waitForPort(port, startTimeoutMs)]);
   } catch (err) {
     await kill();
     throw err;
