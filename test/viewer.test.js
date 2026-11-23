@@ -5,6 +5,12 @@ import { PassThrough } from 'node:stream';
 import { runViewer, nextEveryNth, keyQuits, followable } from '../src/viewer.js';
 import { kittyQuery, leaveScreen, deleteAll } from '../src/kitty.js';
 import { startFakeCdp } from './helpers/fake-cdp.js';
+import fs from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
+import { cellToPage, fit } from '../src/layout.js';
+import { paths } from '../src/paths.js';
+import { controlPath, readControl, setAgentBusy } from '../src/control.js';
 
 const ESC = '\x1b';
 
@@ -561,10 +567,24 @@ test('fill: Chrome going away (exit 1) with fill on still restores the terminal'
 });
 
 // --- keys and finishing ---
-test('q in the same chunk as a terminal reply still quits; an arrow key alone does not', async () => {
+test('interactive: q in the same chunk as a terminal reply still quits before any input', async () => {
   fake = await startFakeCdp();
   const t = fakeTerm();
   const { p } = start(t);
+  await until(() => methods(fake, 'Page.startScreencast').length === 1);
+  let done = false;
+  p.then(() => { done = true; });
+  t.stdin.write(`${ESC}_Gi=31;OK${ESC}\\`);
+  await new Promise((r) => setTimeout(r, 100));
+  assert.equal(done, false, 'a reply alone quit');
+  t.stdin.write(`${ESC}[?62;cq`);
+  assert.equal(await p, 0);
+});
+
+test('watch only: q in the same chunk as a terminal reply still quits; an arrow key alone does not', async () => {
+  fake = await startFakeCdp();
+  const t = fakeTerm();
+  const { p } = start(t, { interactive: false });
   await until(() => methods(fake, 'Page.startScreencast').length === 1);
   let done = false;
   p.then(() => { done = true; });
@@ -682,3 +702,325 @@ test('after a resize repaint everything is cleared and the next frame starts cle
   t.stdin.write('q');
   assert.equal(await p, 0);
 });
+
+// --- interactive input: mouse, keys, paste, reserved keys, control of agent browsers ---
+const W = 1037; // CSS viewport the fake frames report (metadata.deviceWidth/Height)
+const H = 1443;
+
+// A fake CDP whose screencast sends one frame of png size w x h, so the viewer has an image placed.
+async function startDrawing(w = 1037, h = 1443) {
+  const f = await startFakeCdp({
+    handlers: {
+      'Page.startScreencast': () => {
+        setTimeout(() => f.send({ method: 'Page.screencastFrame', params: { data: fakePng(w, h), sessionId: 1, metadata: { deviceWidth: W, deviceHeight: H } } }), 10);
+        return {};
+      },
+    },
+  });
+  return f;
+}
+
+async function tmpHome() {
+  return fs.mkdtemp(path.join(os.tmpdir(), 'tb-view-'));
+}
+
+async function startInteractive(opts = {}, png = [1037, 1443]) {
+  fake = await startDrawing(...png);
+  const t = fakeTerm();
+  const v = start(t, opts);
+  await until(() => count(t.out(), 'a=T,f=100') === 1);
+  return { t, ...v };
+}
+
+const expectAt = (t, col, row, png = [1037, 1443]) =>
+  cellToPage(col, row, fit({ width: png[0], height: png[1] }, t.size), t.size, { width: W, height: H });
+const mouse = () => methods(fake, 'Input.dispatchMouseEvent').map((m) => m.params);
+const keyDowns = () => methods(fake, 'Input.dispatchKeyEvent').map((m) => m.params).filter((k) => k.type !== 'keyUp');
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const click = (t, col, row, b = 0) => t.stdin.write(`${ESC}[<${b};${col};${row}M${ESC}[<${b};${col};${row}m`);
+const agentOpts = (home, extra = {}) => ({
+  env: { HOME: home }, control: { agentId: 'ag1', idleReturnMs: 300_000, ...extra },
+});
+const MODES_ON = `${ESC}[?1003h${ESC}[?1006h${ESC}[?2004h${ESC}[>29u`;
+
+test('interactive: enables mouse, paste and Kitty keyboard on start and restores them on q', async () => {
+  const { t, p } = await startInteractive();
+  assert.ok(t.out().includes(MODES_ON));
+  t.stdin.write('q');
+  assert.equal(await p, 0);
+  const tail = t.out().slice(t.out().lastIndexOf(MODES_ON));
+  for (const off of [`${ESC}[<u`, `${ESC}[?1003l`, `${ESC}[?1006l`, `${ESC}[?2004l`]) assert.ok(tail.includes(off), `missing ${JSON.stringify(off)}`);
+  assert.ok(tail.indexOf(`${ESC}[<u`) < tail.indexOf(`${ESC}[?1049l`), 'Kitty keyboard popped before leaving the alternate screen');
+  assert.ok(t.out().endsWith(leaveScreen()));
+});
+
+test('interactive: a click goes to the page at the cell centre', async () => {
+  const { t, p } = await startInteractive();
+  click(t, 10, 5);
+  await until(() => mouse().length === 2);
+  const [down, up] = mouse();
+  const at = expectAt(t, 10, 5);
+  assert.deepEqual([down.type, up.type], ['mousePressed', 'mouseReleased']);
+  for (const m of [down, up]) {
+    assert.equal(m.x, at.x);
+    assert.equal(m.y, at.y);
+    assert.equal(m.button, 'left');
+    assert.equal(m.clickCount, 1);
+  }
+  t.signals.emit('SIGTERM');
+  assert.equal(await p, 0);
+});
+
+test('interactive: two clicks within 400 ms make a double click', async () => {
+  const { t, p } = await startInteractive();
+  click(t, 10, 5);
+  await sleep(50);
+  click(t, 10, 5);
+  await until(() => mouse().length === 4);
+  assert.deepEqual(mouse().map((m) => m.clickCount), [1, 1, 2, 2]);
+  await sleep(450);
+  click(t, 10, 5);
+  await until(() => mouse().length === 6);
+  assert.equal(mouse()[4].clickCount, 1, 'a click after 400 ms starts over');
+  t.signals.emit('SIGTERM');
+  assert.equal(await p, 0);
+});
+
+test('interactive: click outside image ignored (status row, letterbox) and takes no control', async () => {
+  const home = await tmpHome();
+  const png = [500, 1443]; // narrow page: letterboxed on the right
+  const { t, p } = await startInteractive(agentOpts(home), png);
+  const place = fit({ width: png[0], height: png[1] }, t.size);
+  click(t, 10, t.size.rows); // status row
+  click(t, place.cols + 5, 5); // right of the image
+  t.stdin.write(`${ESC}[<65;${place.cols + 5};5M`); // wheel there too
+  await sleep(150);
+  assert.equal(mouse().length, 0);
+  await assert.rejects(fs.access(controlPath('ag1', paths({ HOME: home }))));
+  t.stdin.write('q'); // still before the first input
+  assert.equal(await p, 0);
+});
+
+test('interactive: wheel down scrolls 100 px; shift-wheel scrolls sideways', async () => {
+  const { t, p } = await startInteractive();
+  t.stdin.write(`${ESC}[<65;10;5M`);
+  t.stdin.write(`${ESC}[<69;10;5M`); // shift + wheel down
+  await until(() => mouse().length === 2);
+  const [w, s] = mouse();
+  assert.equal(w.type, 'mouseWheel');
+  assert.equal(w.deltaY, 100);
+  assert.equal(w.deltaX, 0);
+  assert.equal(w.x, expectAt(t, 10, 5).x);
+  assert.equal(s.deltaX, 100);
+  assert.equal(s.deltaY, 0);
+  t.signals.emit('SIGTERM');
+  assert.equal(await p, 0);
+});
+
+test('interactive: typed string arrives in order', async () => {
+  const { t, p } = await startInteractive();
+  t.stdin.write('abc');
+  await until(() => keyDowns().length === 3);
+  assert.deepEqual(keyDowns().map((k) => [k.type, k.key, k.text]), [['keyDown', 'a', 'a'], ['keyDown', 'b', 'b'], ['keyDown', 'c', 'c']]);
+  const all = methods(fake, 'Input.dispatchKeyEvent').map((m) => `${m.params.type}:${m.params.key}`);
+  assert.deepEqual(all, ['keyDown:a', 'keyUp:a', 'keyDown:b', 'keyUp:b', 'keyDown:c', 'keyUp:c']);
+  t.signals.emit('SIGTERM');
+  assert.equal(await p, 0);
+});
+
+test('interactive: paste and non-ASCII text are inserted as text', async () => {
+  const { t, p } = await startInteractive();
+  t.stdin.write(`${ESC}[200~hello\nworld${ESC}[201~`);
+  t.stdin.write('é');
+  await until(() => methods(fake, 'Input.insertText').length === 2);
+  assert.deepEqual(methods(fake, 'Input.insertText').map((m) => m.params.text), ['hello\nworld', 'é']);
+  assert.equal(methods(fake, 'Input.dispatchKeyEvent').length, 0);
+  t.signals.emit('SIGTERM');
+  assert.equal(await p, 0);
+});
+
+test('interactive: before any input Ctrl-C quits', async () => {
+  const { t, p } = await startInteractive();
+  t.stdin.write('\x03');
+  assert.equal(await p, 0);
+  assert.equal(methods(fake, 'Input.dispatchKeyEvent').length, 0);
+});
+
+test('interactive: after a click, q goes to the page and the viewer keeps running', async () => {
+  const { t, p } = await startInteractive();
+  let done = false;
+  p.then(() => { done = true; });
+  click(t, 10, 5);
+  t.stdin.write('q');
+  t.stdin.write('\x03');
+  await until(() => keyDowns().length === 2);
+  assert.deepEqual(keyDowns().map((k) => [k.key, k.modifiers]), [['q', 0], ['c', 2]]);
+  await sleep(100);
+  assert.equal(done, false);
+  t.stdin.write(`\x1dq`); // prefix, quit
+  assert.equal(await p, 0);
+});
+
+test('interactive: prefix then q quits; status shows prefix… while armed', async () => {
+  const { t, p } = await startInteractive();
+  click(t, 10, 5);
+  t.stdin.write('\x1d');
+  await until(() => t.out().includes('prefix…'));
+  t.stdin.write('q');
+  assert.equal(await p, 0);
+  assert.equal(keyDowns().length, 0);
+});
+
+test('interactive: prefix twice sends the prefix key; anything else cancels it', async () => {
+  const { t, p } = await startInteractive();
+  t.stdin.write('\x1d\x1d');
+  await until(() => keyDowns().length === 1);
+  assert.equal(keyDowns()[0].key, ']');
+  assert.equal(keyDowns()[0].modifiers, 2);
+  t.stdin.write('\x1dx'); // cancelled: x is dropped
+  t.stdin.write('y');
+  await until(() => keyDowns().length === 2);
+  assert.equal(keyDowns()[1].key, 'y');
+  t.stdin.write(`${ESC}[93;5u`); // Kitty keyboard form of Ctrl-]
+  t.stdin.write(`${ESC}[113u`); // q
+  assert.equal(await p, 0);
+});
+
+test('interactive: the prefix disarms after 2 s', async () => {
+  const { t, p } = await startInteractive();
+  click(t, 10, 5);
+  t.stdin.write('\x1d');
+  await sleep(2100);
+  t.stdin.write('q');
+  await until(() => keyDowns().length === 1);
+  assert.equal(keyDowns()[0].key, 'q');
+  t.signals.emit('SIGTERM');
+  assert.equal(await p, 0);
+});
+
+test('interactive: on an agent browser the first click takes control; prefix g hands it back', async () => {
+  const home = await tmpHome();
+  const p0 = paths({ HOME: home });
+  const { t, p } = await startInteractive(agentOpts(home));
+  await until(() => /agent · https:\/\/example\.com\/ · \d+ fps/.test(t.out()));
+  click(t, 10, 5);
+  await untilAsync(async () => (await readControl('ag1', p0)).held);
+  const c = JSON.parse(await fs.readFile(controlPath('ag1', p0), 'utf8'));
+  assert.equal(c.viewerPid, process.pid);
+  assert.equal(c.url, 'https://example.com/');
+  assert.equal(c.idleReturnMs, 300_000);
+  await until(() => t.out().includes('you have control · Ctrl-] g to hand back'));
+  const from = t.out().length;
+  t.stdin.write('\x1dg');
+  await untilAsync(async () => !(await readControl('ag1', p0)).held);
+  const after = await readControl('ag1', p0);
+  assert.equal(after.takeovers, 1);
+  assert.equal(after.lastTakeover.url, 'https://example.com/');
+  await until(() => /agent · https:\/\/example\.com\/ · /.test(t.out().slice(from)));
+  t.signals.emit('SIGTERM');
+  assert.equal(await p, 0);
+});
+
+test('interactive: hover is forwarded on an agent browser only while holding control', async () => {
+  const home = await tmpHome();
+  const { t, p } = await startInteractive(agentOpts(home));
+  t.stdin.write(`${ESC}[<35;12;6M`);
+  await sleep(100);
+  assert.equal(mouse().length, 0, 'hover before taking control');
+  assert.equal((await readControl('ag1', paths({ HOME: home }))).held, false, 'hover does not take control');
+  click(t, 10, 5);
+  await until(() => mouse().length === 2);
+  for (let i = 0; i < 20; i++) t.stdin.write(`${ESC}[<35;${12 + (i % 5)};6M`);
+  await sleep(200);
+  const moves = mouse().filter((m) => m.type === 'mouseMoved');
+  assert.ok(moves.length >= 1 && moves.length <= 8, `throttled hover: ${moves.length} moves`);
+  const last = moves.at(-1);
+  assert.equal(last.x, expectAt(t, 12 + (19 % 5), 6).x, 'the last position is delivered');
+  assert.equal(last.button, 'none');
+  t.signals.emit('SIGTERM');
+  assert.equal(await p, 0);
+});
+
+test('interactive: a standalone browser forwards hover always and never writes a control file', async () => {
+  const home = await tmpHome();
+  const { t, p } = await startInteractive({ env: { HOME: home }, control: { agentId: null, idleReturnMs: 300_000 } });
+  t.stdin.write(`${ESC}[<35;12;6M`);
+  await until(() => mouse().length === 1);
+  assert.equal(mouse()[0].type, 'mouseMoved');
+  click(t, 10, 5);
+  t.stdin.write('abc');
+  await until(() => keyDowns().length === 3);
+  await sleep(100);
+  await assert.rejects(fs.readdir(path.join(paths({ HOME: home }).state, 'control')));
+  assert.ok(!t.out().includes('you have control'));
+  t.stdin.write('\x1dg'); // nothing to hand back
+  t.stdin.write('\x1dq');
+  assert.equal(await p, 0);
+});
+
+test('interactive: SIGTERM while holding control releases it and restores modes', async () => {
+  const home = await tmpHome();
+  const p0 = paths({ HOME: home });
+  const { t, p } = await startInteractive(agentOpts(home));
+  click(t, 10, 5);
+  await untilAsync(async () => (await readControl('ag1', p0)).held);
+  t.signals.emit('SIGTERM');
+  assert.equal(await p, 0);
+  assert.equal((await readControl('ag1', p0)).held, false);
+  const raw = JSON.parse(await fs.readFile(controlPath('ag1', p0), 'utf8'));
+  assert.equal(raw.holder, null);
+  assert.ok(t.out().includes(`${ESC}[<u`) && t.out().includes(`${ESC}[?1003l`) && t.out().includes(`${ESC}[?2004l`));
+  assert.ok(t.out().endsWith(leaveScreen()));
+});
+
+test('interactive: idle return hands control back on its own', async () => {
+  const home = await tmpHome();
+  const p0 = paths({ HOME: home });
+  const { t, p } = await startInteractive(agentOpts(home, { idleReturnMs: 100 }));
+  click(t, 10, 5);
+  await untilAsync(async () => (await readControl('ag1', p0)).held);
+  const raw = () => fs.readFile(controlPath('ag1', p0), 'utf8').then(JSON.parse);
+  await untilAsync(async () => (await raw()).holder === null, 1000);
+  await until(() => /agent · https:\/\/example\.com\/ · [^\n]*$/.test(t.out()));
+  t.signals.emit('SIGTERM');
+  assert.equal(await p, 0);
+});
+
+test('interactive: taking control while the agent is acting says so for a moment', async () => {
+  const home = await tmpHome();
+  const p0 = paths({ HOME: home });
+  await setAgentBusy('ag1', true, p0);
+  const { t, p } = await startInteractive(agentOpts(home));
+  click(t, 10, 5);
+  await until(() => t.out().includes('agent was acting…'));
+  t.signals.emit('SIGTERM');
+  assert.equal(await p, 0);
+});
+
+test('interactive: a click in the same chunk as a size reply is still delivered', async () => {
+  const { t, p } = await startInteractive();
+  t.stdin.write(`${ESC}[6;37;17t${ESC}[<0;10;5M${ESC}[?62;c${ESC}[<0;10;5m`);
+  await until(() => mouse().length === 2);
+  t.signals.emit('SIGTERM');
+  assert.equal(await p, 0);
+});
+
+test('watch only (interactive: false): no modes, q quits after other keys', async () => {
+  fake = await startFakeCdp();
+  const t = fakeTerm();
+  const { p } = start(t, { interactive: false });
+  await until(() => methods(fake, 'Page.startScreencast').length === 1);
+  t.stdin.write(`${ESC}[<0;10;5Mab`);
+  t.stdin.write('q');
+  assert.equal(await p, 0);
+  assert.ok(!t.out().includes(`${ESC}[?1003h`));
+  assert.equal(methods(fake, 'Input.dispatchMouseEvent').length + methods(fake, 'Input.dispatchKeyEvent').length, 0);
+});
+
+async function untilAsync(cond, ms = 3000) {
+  const deadline = Date.now() + ms;
+  while (!(await cond().catch(() => false))) {
+    if (Date.now() > deadline) throw new Error('timed out waiting');
+    await new Promise((r) => setTimeout(r, 10));
+  }
+}

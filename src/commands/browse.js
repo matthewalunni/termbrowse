@@ -102,6 +102,8 @@ export async function runBrowse(
       env,
       signals,
       fill: resolveFill({ kind: 'standalone', ...cfg.view, flag: fillOverride }),
+      keys: cfg.keys,
+      control: { agentId: null, idleReturnMs: cfg.control.idleReturnMs }, // standalone: no control file
       // Signals after this point reach the viewer directly; replay one it could not see.
       onReady: () => { if (interrupted) signals.emit(interrupted, interrupted); },
     });

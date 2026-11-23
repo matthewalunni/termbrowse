@@ -1,8 +1,13 @@
 // Live viewer: draws one Chrome tab's screencast into the terminal with Kitty graphics.
 import { pngSize, encodeFrame, deleteAll, deleteImage, enterScreen, leaveScreen } from './kitty.js';
-import { fit, screencastSize, saneSize } from './layout.js';
+import { fit, screencastSize, saneSize, cellToPage } from './layout.js';
 import { listTargets, browserVersion, pickTarget, CdpSession } from './cdp.js';
 import { termSize, detectKitty } from './tty.js';
+import { InputParser } from './input.js';
+import { toKeyEvents, isPrintable, matchesSpec } from './keymap.js';
+import { parseKeySpec } from './config.js';
+import { paths } from './paths.js';
+import { takeControl, touchControl, releaseControl, readControl } from './control.js';
 
 const ESC = '\x1b';
 export const NO_KITTY = "termbrowse: this terminal doesn't support Kitty graphics (try Kitty, Ghostty, WezTerm or Herdr)\n";
@@ -38,6 +43,21 @@ export function followable(info) {
 
 const RESIZE_DEBOUNCE_MS = 150;
 
+// Interactive mode: SGR any-event mouse, bracketed paste, then Kitty keyboard flags pushed
+// (1 disambiguate + 4 alternate keys + 8 all keys as escapes + 16 associated text = 29).
+// Kitty keeps a keyboard-flag stack per screen, so it is pushed on the alternate screen and
+// popped before leaving it.
+export const MODES_ON = `${ESC}[?1003h${ESC}[?1006h${ESC}[?2004h${ESC}[>29u`;
+export const MODES_OFF = `${ESC}[<u${ESC}[?2004l${ESC}[?1003l${ESC}[?1006l`;
+const DEFAULT_KEYS = { prefix: parseKeySpec('ctrl-]'), giveBack: parseKeySpec('g'), quit: parseKeySpec('q') };
+const ESC_FLUSH_MS = 50; // a lone ESC this long is the Escape key, not the start of a sequence
+const PREFIX_MS = 2000;
+const CLICK_MS = 400; // double/triple click window
+const HOVER_MS = 1000 / 30; // at most 30 pointer moves a second
+const TOUCH_MS = 1000; // refresh the control file's lastInput at most once a second
+const BUSY_NOTE_MS = 2000;
+const BUTTON_BITS = { left: 1, right: 2, middle: 4 };
+
 // Waits for promise, at most ms; the timer is cleared either way, so it never holds the process open.
 async function within(promise, ms) {
   let timer;
@@ -59,6 +79,10 @@ export async function runViewer({
   onExit,
   onReady,
   fill = false, // lay the page out at the pane's size (Emulation.setDeviceMetricsOverride)
+  interactive = true, // send mouse, keys and paste to the page; false: watch only (q / Ctrl-C quit)
+  keys = DEFAULT_KEYS, // reserved keys (config [keys])
+  // agentId: the agent whose browser this is (control file), null for a standalone browser.
+  control: { agentId = null, idleReturnMs = 300_000 } = {},
 }) {
   // EIO/EPIPE once the terminal is gone (SIGHUP) must not crash the process mid-cleanup.
   const onStdoutError = () => {};
@@ -97,6 +121,25 @@ export async function runViewer({
   let filled = null; // the page session the size override was set on
   let repaint = false; // the pane changed size: clear it together with the next frame drawn
   let shownId = null; // image id on screen (frames alternate 1 and 2); null when nothing is drawn
+  let place = null; // cells the image on screen covers from the top left, null when nothing is drawn
+  let viewport = null; // CSS size of the page the image shows
+  // Input state (interactive mode).
+  const parser = new InputParser();
+  let escTimer = null;
+  let prefixTimer = null; // set while the prefix key is armed
+  let hadInput = false; // q and Ctrl-C quit until the first input; afterwards they go to the page
+  let holding = false; // the user holds control of the agent's browser
+  let lastTouch = 0;
+  let idleTimer = null;
+  let busyNoteUntil = 0;
+  let busyNoteTimer = null;
+  let lastClick = null; // {button, col, row, at, count}
+  const pressed = new Set(); // mouse buttons down on the page
+  let lastMoveAt = 0;
+  let pendingMove = null;
+  let moveTimer = null;
+  let controlOps = Promise.resolve(); // control file writes, in order
+  const statePaths = agentId ? paths(env) : null;
   const received = []; // {t, size} for frames received in the last second
   const drawn = []; // timestamps of frames drawn in the last second
   let resolveRun;
@@ -108,8 +151,16 @@ export async function runViewer({
   };
 
   const statusText = (suffix) => {
-    const room = Math.max(0, term.cols - suffix.length - 2);
-    return `${url.slice(0, room)}  ${suffix}`.slice(0, Math.max(0, term.cols));
+    const width = Math.max(0, term.cols);
+    if (busyNoteUntil > Date.now()) return 'agent was acting…'.slice(0, width);
+    if (prefixTimer) return 'prefix…'.slice(0, width);
+    if (holding) return `you have control · ${keys.prefix.label} ${keys.giveBack.label} to hand back`.slice(0, width);
+    if (agentId) {
+      const room = Math.max(0, width - suffix.length - 'agent ·  · '.length);
+      return `agent · ${url.slice(0, room)} · ${suffix}`.slice(0, width);
+    }
+    const room = Math.max(0, width - suffix.length - 2);
+    return `${url.slice(0, room)}  ${suffix}`.slice(0, width);
   };
   const statusSeq = (text) => `${ESC}[${term.rows};1H${ESC}[2K${text}`;
   const setStatus = (suffix, force = false) => {
@@ -150,7 +201,7 @@ export async function runViewer({
     await startScreencast();
   };
 
-  const onFrame = ({ data, sessionId }) => {
+  const onFrame = ({ data, sessionId, metadata }) => {
     page.send('Page.screencastFrameAck', { sessionId }).catch(() => {});
     if (closing) return;
     const now = Date.now();
@@ -165,11 +216,19 @@ export async function runViewer({
     }
     if (paused || busy) return;
     let frame;
+    let size;
+    let fitted;
     try {
-      frame = encodeFrame(data, fit(pngSize(data), term), shownId === 1 ? 2 : 1);
+      size = pngSize(data);
+      fitted = fit(size, term);
+      frame = encodeFrame(data, fitted, shownId === 1 ? 2 : 1);
     } catch {
       return; // not a PNG we can read
     }
+    place = fitted;
+    viewport = metadata?.deviceWidth > 0 && metadata?.deviceHeight > 0
+      ? { width: metadata.deviceWidth, height: metadata.deviceHeight }
+      : size;
     drawn.push(now);
     status = statusText(`${drawn.length} fps`);
     // Double buffer: the new image is placed under the other id before the old one is deleted,
@@ -197,8 +256,16 @@ export async function runViewer({
     closing = true;
     clearInterval(ticker);
     clearTimeout(resizeTimer);
+    for (const timer of [escTimer, prefixTimer, idleTimer, busyNoteTimer, moveTimer]) clearTimeout(timer);
+    prefixTimer = null;
+    busyNoteUntil = 0;
     stdin.removeListener('data', onKey);
     for (const [sig, fn] of sigHandlers) signals.removeListener(sig, fn);
+    // Hand the agent its browser back first, so it doesn't wait on the rest of the cleanup.
+    if (holding) {
+      holding = false;
+      queueControl(() => releaseControl(agentId, { url }, statePaths));
+    }
     // A size query in flight puts raw mode back as it found it when it ends: let it end first.
     await within(resizing, 1000);
     if (code === 0) {
@@ -207,7 +274,8 @@ export async function runViewer({
       setStatus('disconnected', true);
       await Promise.all([clearFill(), new Promise((r) => setTimeout(r, 1000))]);
     }
-    stdout.write(leaveScreen());
+    await within(controlOps, 1000);
+    stdout.write((interactive ? MODES_OFF : '') + leaveScreen());
     if (typeof stdin.setRawMode === 'function' && !!stdin.isRaw !== wasRaw) stdin.setRawMode(wasRaw);
     if (!wasFlowing) stdin.pause();
     page.close();
@@ -302,6 +370,7 @@ export async function runViewer({
         paused = true;
         repaint = false;
         shownId = null;
+        place = null;
         stdout.write(`${deleteAll()}${ESC}[2J`);
         await stopScreencast();
         setStatus('paused', true);
@@ -323,8 +392,195 @@ export async function runViewer({
     resizeTimer = setTimeout(() => { resize(); }, RESIZE_DEBOUNCE_MS);
   };
 
+  // --- input (interactive mode) ---
+  const queueControl = (op) => {
+    controlOps = controlOps.then(op).catch(() => {});
+    return controlOps;
+  };
+  const showStatus = () => { if (!closing) setStatus(paused ? 'paused' : fpsSuffix(), true); };
+  const send = (method, params) => { page.send(method, params).catch(() => {}); };
+
+  const giveBack = () => {
+    clearTimeout(idleTimer);
+    if (!holding) return;
+    holding = false;
+    queueControl(() => releaseControl(agentId, { url }, statePaths));
+    showStatus();
+  };
+
+  // A mouse press, key, paste or wheel: the user acts on the page. On an agent browser that takes
+  // control (the input itself is sent at once, not after the file write).
+  const acted = () => {
+    hadInput = true;
+    if (!agentId) return;
+    const now = Date.now();
+    clearTimeout(idleTimer);
+    idleTimer = setTimeout(giveBack, idleReturnMs);
+    if (!holding) {
+      holding = true;
+      lastTouch = now;
+      const at = url;
+      queueControl(async () => {
+        await takeControl(agentId, { viewerPid: process.pid, url: at, idleReturnMs }, statePaths);
+        if (!(await readControl(agentId, statePaths)).agentBusySince || closing) return;
+        busyNoteUntil = Date.now() + BUSY_NOTE_MS;
+        clearTimeout(busyNoteTimer);
+        busyNoteTimer = setTimeout(showStatus, BUSY_NOTE_MS + 10);
+        showStatus();
+      });
+      showStatus();
+    } else if (now - lastTouch >= TOUCH_MS) {
+      lastTouch = now;
+      queueControl(() => touchControl(agentId, statePaths));
+    }
+  };
+
+  const modifiers = (ev) => (ev.alt ? 1 : 0) | (ev.ctrl ? 2 : 0) | (ev.meta ? 4 : 0) | (ev.shift ? 8 : 0);
+  const buttonsMask = () => [...pressed].reduce((m, b) => m | (BUTTON_BITS[b] ?? 0), 0);
+  // Page coordinates for a cell; outside the image null, unless clamped (a drag or release that
+  // left the image still reaches the page at its edge).
+  const pageAt = (col, row, clamp = false) => {
+    if (!place || !viewport || paused) return null;
+    if (clamp) {
+      col = Math.min(Math.max(col, 1), place.cols);
+      row = Math.min(Math.max(row, 1), place.rows);
+    }
+    return cellToPage(col, row, place, term, viewport);
+  };
+
+  const sendMove = () => {
+    moveTimer = null;
+    if (!pendingMove || closing) return;
+    const ev = pendingMove;
+    pendingMove = null;
+    const at = pageAt(ev.col, ev.row, pressed.size > 0);
+    if (!at) return;
+    lastMoveAt = Date.now();
+    send('Input.dispatchMouseEvent', {
+      type: 'mouseMoved', ...at, button: ev.button, buttons: buttonsMask(), modifiers: modifiers(ev),
+    });
+  };
+
+  const onMouse = (ev) => {
+    if (ev.action === 'move') {
+      // Pointer movement alone never takes control; hover on an agent browser only while holding it.
+      if (agentId && !holding && pressed.size === 0) return;
+      pendingMove = ev;
+      if (moveTimer) return;
+      const wait = Math.max(0, lastMoveAt + HOVER_MS - Date.now());
+      if (wait === 0) sendMove();
+      else moveTimer = setTimeout(sendMove, wait);
+      return;
+    }
+    if (ev.action === 'press') {
+      const at = pageAt(ev.col, ev.row);
+      if (!at) return;
+      acted();
+      const now = Date.now();
+      const again = lastClick && lastClick.button === ev.button && now - lastClick.at <= CLICK_MS
+        && Math.abs(lastClick.col - ev.col) <= 1 && Math.abs(lastClick.row - ev.row) <= 1;
+      lastClick = { button: ev.button, col: ev.col, row: ev.row, at: now, count: again ? lastClick.count + 1 : 1 };
+      pressed.add(ev.button);
+      clearTimeout(moveTimer); // a queued move must not land after the press
+      moveTimer = null;
+      pendingMove = null;
+      send('Input.dispatchMouseEvent', {
+        type: 'mousePressed', ...at, button: ev.button, buttons: buttonsMask(),
+        clickCount: lastClick.count, modifiers: modifiers(ev),
+      });
+      return;
+    }
+    // release: only for a press the page saw
+    if (!pressed.has(ev.button)) return;
+    const at = pageAt(ev.col, ev.row, true);
+    pressed.delete(ev.button);
+    if (!at) return;
+    if (moveTimer) { clearTimeout(moveTimer); sendMove(); }
+    acted();
+    send('Input.dispatchMouseEvent', {
+      type: 'mouseReleased', ...at, button: ev.button, buttons: buttonsMask(),
+      clickCount: lastClick?.count ?? 1, modifiers: modifiers(ev),
+    });
+  };
+
+  const onWheel = (ev) => {
+    const at = pageAt(ev.col, ev.row);
+    if (!at) return;
+    acted();
+    const lines = ev.dy || 0;
+    const sideways = ev.shift && !ev.dx;
+    send('Input.dispatchMouseEvent', {
+      type: 'mouseWheel', ...at,
+      deltaX: (sideways ? lines : ev.dx || 0) * 100,
+      deltaY: sideways ? 0 : lines * 100,
+      modifiers: modifiers(ev),
+    });
+  };
+
+  const insertText = (text) => {
+    acted();
+    send('Input.insertText', { text });
+  };
+
+  const sendKey = (ev) => {
+    acted();
+    // Composed or non-ASCII text (é, emoji, IME) has no US key: insert it as text.
+    if (isPrintable(ev) && /[^\x00-\x7f]/.test(ev.text)) {
+      send('Input.insertText', { text: ev.text });
+      return;
+    }
+    for (const params of toKeyEvents(ev)) send('Input.dispatchKeyEvent', params);
+  };
+
+  const disarm = () => {
+    clearTimeout(prefixTimer);
+    prefixTimer = null;
+    showStatus();
+  };
+
+  const onKeyEvent = (ev) => {
+    if (prefixTimer) {
+      disarm();
+      if (matchesSpec(ev, keys.quit)) finish(0);
+      else if (matchesSpec(ev, keys.giveBack)) giveBack();
+      else if (matchesSpec(ev, keys.prefix)) sendKey(ev);
+      return; // anything else just cancels the prefix
+    }
+    if (matchesSpec(ev, keys.prefix)) {
+      prefixTimer = setTimeout(disarm, PREFIX_MS);
+      showStatus();
+      return;
+    }
+    if (!hadInput && (matchesSpec(ev, { key: 'q' }) || matchesSpec(ev, { key: 'c', ctrl: true }))) {
+      finish(0);
+      return;
+    }
+    sendKey(ev);
+  };
+
+  const onEvent = (ev) => {
+    if (closing) return;
+    if (ev.type === 'key') onKeyEvent(ev);
+    else if (ev.type === 'mouse') onMouse(ev);
+    else if (ev.type === 'wheel') onWheel(ev);
+    else if (ev.type === 'paste') insertText(ev.text);
+    // 'reply': size and Kitty replies are read by the query in flight (tty.js) from the same stdin.
+  };
+
   const onKey = (chunk) => {
-    if (keyQuits(chunk)) finish(0);
+    if (!interactive) {
+      if (keyQuits(chunk)) finish(0);
+      return;
+    }
+    clearTimeout(escTimer);
+    escTimer = null;
+    for (const ev of parser.push(chunk)) onEvent(ev);
+    if (parser.buf !== '' && !closing) {
+      escTimer = setTimeout(() => {
+        escTimer = null;
+        for (const ev of parser.flush()) onEvent(ev);
+      }, ESC_FLUSH_MS);
+    }
   };
 
   const sigHandlers = [
@@ -335,7 +591,7 @@ export async function runViewer({
   ];
 
   attachPage(page);
-  stdout.write(enterScreen());
+  stdout.write(enterScreen() + (interactive ? MODES_ON : ''));
   if (typeof stdin.setRawMode === 'function') stdin.setRawMode(true);
   stdin.on('data', onKey);
   stdin.resume();
