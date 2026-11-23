@@ -96,3 +96,24 @@ test('concurrent agentProfile calls for one id yield one complete copy and no tm
   assert.equal((await fs.readdir(path.join(p.profiles, 'same', 'Default'))).length, 200);
   assert.deepEqual(await fs.readdir(p.profiles), ['same']);
 });
+
+test('pruneProfiles removes standalone-<pid> dirs of dead pids regardless of age', async () => {
+  const p = await tmpPaths();
+  const { spawn } = await import('node:child_process');
+  const live = spawn('sleep', ['30'], { stdio: 'ignore' });
+  const dead = spawn('true', { stdio: 'ignore' });
+  await new Promise((r) => dead.once('exit', r));
+  try {
+    const deadDir = await fs.mkdir(path.join(p.profiles, `standalone-${dead.pid}`), { recursive: true }).then(() => path.join(p.profiles, `standalone-${dead.pid}`));
+    const liveDir = path.join(p.profiles, `standalone-${live.pid}`);
+    await fs.mkdir(liveDir, { recursive: true });
+    const agentDir = await agentProfile(`standalone-x`, p); // not a pid: an ordinary (fresh) agent id
+    const removed = await pruneProfiles(7, p);
+    assert.deepEqual(removed, [`standalone-${dead.pid}`]);
+    assert.equal(await exists(deadDir), false);
+    assert.equal(await exists(liveDir), true);
+    assert.equal(await exists(agentDir), true);
+  } finally {
+    live.kill('SIGKILL');
+  }
+});

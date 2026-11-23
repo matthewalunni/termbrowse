@@ -8,6 +8,9 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { normalizeUrl, runBrowse } from '../src/commands/browse.js';
+import { runLogin } from '../src/commands/login.js';
+import { browserVersion, listTargets } from '../src/cdp.js';
+import { freePort } from '../src/chrome.js';
 import { kittyQuery } from '../src/kitty.js';
 import { paths } from '../src/paths.js';
 import { upsertEntry, readRegistry } from '../src/registry.js';
@@ -210,28 +213,101 @@ test('unknown options and extra arguments after the URL are usage errors', async
   assert.equal((await run(['agents', '--nope'])).code, 2);
 });
 
-test('browse: standalone Chrome copied from the starter, registered, drawn, and closed on SIGTERM', { skip, timeout: 60_000 }, async () => {
+async function startBrowse(pid) {
+  const t = fakeTerm();
+  const result = runBrowse('data:text/html,<body style="background:red">hi</body>', { ...t, pid });
+  const entry = await until(async () => (await readRegistry(p)).find((e) => e.agentId === `standalone-${pid}`), 30_000);
+  return { t, result, entry };
+}
+
+test('browse: fresh starter copy per run, registered, drawn, closed and deleted on SIGTERM; two at once', { skip, timeout: 90_000 }, async () => {
   await mkdir(p.starter, { recursive: true });
   await writeFile(join(p.starter, 'from-starter'), 'x');
-  await writeFile(join(p.starter, 'SingletonLock'), 'x');
-  const t = fakeTerm();
-  const result = runBrowse('data:text/html,<body style="background:red">hi</body>', t);
-  const entry = await until(async () => (await readRegistry(p)).find((e) => e.kind === 'standalone'), 30_000);
-  assert.ok(entry, 'standalone entry registered');
-  assert.equal(entry.agentId, `standalone-${process.pid}`);
-  assert.equal(entry.wrapperPid, process.pid);
-  assert.equal(entry.profileDir, join(p.state, 'standalone'));
-  assert.ok(alive(entry.pid));
-  await stat(join(entry.profileDir, 'from-starter'));
-  await assert.rejects(stat(join(entry.profileDir, 'SingletonLock')));
-  assert.ok(await until(() => t.out().includes('\x1b_G'), 15_000), 'a Kitty frame was drawn');
-  assert.equal((await until(async () => (await readFile(hookOut, 'utf8').catch(() => '')).trim(), 15_000)), 'standalone []');
+  await writeFile(join(p.starter, 'lockfile'), 'x'); // never copied (a real SingletonLock would stop login's Chrome below)
+  // Each run is named by a pid; live stand-ins let two runs share this test process.
+  const [pidA, pidB] = [fakeChrome().pid, fakeChrome().pid];
+  const [a, b] = await Promise.all([startBrowse(pidA), startBrowse(pidB)]);
+  for (const [run, pid] of [[a, pidA], [b, pidB]]) {
+    assert.ok(run.entry, 'standalone entry registered');
+    assert.equal(run.entry.kind, 'standalone');
+    assert.equal(run.entry.wrapperPid, process.pid);
+    assert.equal(run.entry.profileDir, join(p.profiles, `standalone-${pid}`));
+    assert.ok(alive(run.entry.pid));
+    await stat(join(run.entry.profileDir, 'from-starter'));
+    await assert.rejects(stat(join(run.entry.profileDir, 'lockfile')));
+    assert.ok(await until(() => run.t.out().includes('\x1b_G'), 15_000), 'a Kitty frame was drawn');
+  }
+  assert.notEqual(a.entry.port, b.entry.port);
+  assert.notEqual(a.entry.profileDir, b.entry.profileDir);
+  assert.match(await until(async () => (await readFile(hookOut, 'utf8').catch(() => '')).trim(), 15_000), /^standalone \[\]$/);
 
-  t.signals.emit('SIGTERM');
-  assert.equal(await result, 0);
-  assert.equal(alive(entry.pid), false);
+  a.t.signals.emit('SIGTERM');
+  assert.equal(await a.result, 0);
+  assert.equal(alive(a.entry.pid), false);
+  await assert.rejects(stat(a.entry.profileDir), 'profile deleted after exit');
+  assert.deepEqual((await readRegistry(p)).map((e) => e.agentId), [`standalone-${pidB}`]);
+  assert.equal(a.t.signals.listenerCount('SIGTERM'), 0);
+
+  b.t.signals.emit('SIGTERM');
+  assert.equal(await b.result, 0);
+  await assert.rejects(stat(b.entry.profileDir));
   assert.deepEqual(await readRegistry(p), []);
-  assert.equal(t.signals.listenerCount('SIGTERM'), 0);
+});
+
+// Login with a headless Chrome (tests must not open windows) and a short save delay.
+async function startLogin(saveDelayMs) {
+  const port = await freePort();
+  const stdin = new PassThrough();
+  const stdout = new PassThrough();
+  const stderr = new PassThrough();
+  let out = '';
+  let err = '';
+  stdout.on('data', (d) => (out += d));
+  stderr.on('data', (d) => (err += d));
+  const signals = new EventEmitter();
+  const result = runLogin([], { stdin, stdout, stderr, env, signals, saveDelayMs, chromeOptions: { headless: true, port } });
+  return { port, stdin, signals, result, out: () => out, err: () => err };
+}
+
+test('login: Enter, then Saving…, Chrome kept for the delay, then closed', { skip, timeout: 60_000 }, async () => {
+  const l = await startLogin(1500);
+  assert.ok(await until(() => l.out().includes('Sign in to the sites your agents need, then press Enter here (or close the browser window).\n'), 30_000));
+  const { port } = l;
+  l.stdin.write('\n');
+  assert.ok(await until(() => l.out().includes('Saving your sign-ins…'), 5000));
+  assert.ok(await browserVersion(port), 'Chrome still running during the save delay');
+  assert.equal(await l.result, 0);
+  assert.equal(await browserVersion(port), null);
+  assert.equal(l.err(), '');
+});
+
+test('login: closing the last page finishes too', { skip, timeout: 60_000 }, async () => {
+  const l = await startLogin(0);
+  assert.ok(await until(() => l.out().includes('press Enter'), 30_000));
+  const { port } = l;
+  for (const t of (await listTargets(port)).filter((x) => x.type === 'page')) {
+    await fetch(`http://127.0.0.1:${port}/json/close/${t.id}`);
+  }
+  assert.equal(await l.result, 0);
+  assert.match(l.out(), /Saving your sign-ins…/);
+  assert.equal(await browserVersion(port), null);
+});
+
+test('login: Ctrl-C while saving asks once more; a second quits at once with a warning', { skip, timeout: 60_000 }, async () => {
+  const l = await startLogin(60_000);
+  assert.ok(await until(() => l.out().includes('press Enter'), 30_000));
+  const { port } = l;
+  l.stdin.write('\n');
+  assert.ok(await until(() => l.out().includes('Saving your sign-ins…'), 5000));
+  l.signals.emit('SIGINT');
+  assert.ok(await until(() => /Ctrl-C again/.test(l.err()), 2000), l.err());
+  assert.ok(await browserVersion(port), 'still saving after one Ctrl-C');
+  const t0 = Date.now();
+  l.signals.emit('SIGINT');
+  assert.equal(await l.result, 130);
+  assert.ok(Date.now() - t0 < 10_000);
+  assert.match(l.err(), /recent sign-ins may not be saved/);
+  assert.equal(await browserVersion(port), null);
 });
 
 test('no arguments prints usage and exits 2', async () => {

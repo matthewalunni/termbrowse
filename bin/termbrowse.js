@@ -9,6 +9,9 @@ const USAGE = `Usage: termbrowse <url>
        termbrowse login [url] [--reset]
        termbrowse doctor
        termbrowse --version
+
+termbrowse <url> opens the page in a fresh browser drawn in this terminal; the profile is a
+copy of the login profile and is thrown away on exit. Sign in with \`termbrowse login\`.
 `;
 
 const COMMANDS = {

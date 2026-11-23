@@ -1,11 +1,13 @@
 // `termbrowse <url>`: a Chrome for Testing of its own, drawn in this terminal until you quit.
-import { join } from 'node:path';
+// Each run starts from a fresh copy of the starter profile, deleted afterwards: sign-ins that
+// should last are made with `termbrowse login`.
+import { rm } from 'node:fs/promises';
 import { paths } from '../paths.js';
 import { loadConfig, effectiveHeadless } from '../config.js';
 import { ensureChrome, launchChrome } from '../chrome.js';
 import { runHook } from '../hook.js';
-import { profileFromStarter } from '../profiles.js';
-import { readRegistry, upsertEntry, removeEntry } from '../registry.js';
+import { profileFromStarter, standaloneProfileDir, pruneProfiles } from '../profiles.js';
+import { upsertEntry, removeEntry } from '../registry.js';
 import { listTargets } from '../cdp.js';
 import { runViewer } from '../viewer.js';
 
@@ -22,7 +24,14 @@ export function normalizeUrl(input) {
 
 export async function runBrowse(
   input,
-  { stdin = process.stdin, stdout = process.stdout, stderr = process.stderr, env = process.env, signals = process } = {},
+  {
+    stdin = process.stdin,
+    stdout = process.stdout,
+    stderr = process.stderr,
+    env = process.env,
+    signals = process,
+    pid = process.pid, // names this run's registry entry and profile
+  } = {},
 ) {
   // The viewer would refuse a non-terminal anyway; refuse before starting a Chrome for nothing.
   if (!stdout.isTTY || !stdin.isTTY) {
@@ -32,11 +41,7 @@ export async function runBrowse(
   const url = normalizeUrl(input);
   const p = paths(env);
   const cfg = await loadConfig(env);
-  const other = (await readRegistry(p)).find((e) => e.kind === 'standalone');
-  if (other) {
-    stderr.write(`termbrowse: another termbrowse <url> is running (${other.agentId}, pid ${other.wrapperPid}); they share a profile, so quit it first\n`);
-    return 1;
-  }
+  await pruneProfiles(cfg.agents.pruneDays, p).catch((err) => stderr.write(`termbrowse: pruning profiles failed: ${err.message}\n`));
 
   // A signal before the viewer is up: exit at once if no Chrome is starting yet, else clean up below.
   let interrupted = false;
@@ -48,10 +53,13 @@ export async function runBrowse(
   };
   for (const sig of SIGNALS) signals.on(sig, onSignal);
 
-  const agentId = `standalone-${process.pid}`;
+  const agentId = `standalone-${pid}`;
+  const profileDir = standaloneProfileDir(pid, p);
   try {
     const { executablePath } = await ensureChrome(cfg, p);
-    const profileDir = await profileFromStarter(join(p.state, 'standalone'), p);
+    // Fresh every run, even if a crashed run with a since-reused pid left this dir behind.
+    await rm(profileDir, { recursive: true, force: true });
+    await profileFromStarter(profileDir, p);
     launching = true;
     try {
       chrome = await launchChrome({
@@ -82,6 +90,7 @@ export async function runBrowse(
       await chrome.kill();
       await removeEntry(agentId, p).catch(() => {});
     }
+    await rm(profileDir, { recursive: true, force: true }).catch(() => {});
   }
 }
 
