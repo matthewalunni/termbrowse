@@ -1,0 +1,206 @@
+# termbrowse
+
+termbrowse draws a live Chrome tab inside your terminal with the Kitty graphics protocol. It also gives each AI coding agent its own Chrome for Testing through an MCP server, so you can watch any agent's browser in a pane next to it. It never touches your everyday Google Chrome or its profile. It downloads and uses Chrome for Testing, keeps one profile per agent, and lets you sign in once with `termbrowse login` so new agent profiles start signed in.
+
+![termbrowse in a terminal pane](docs/demo.gif)
+
+The viewer only shows the page. You can't click or type into it, so the page is driven by the agent (or by whatever else talks to its debugging port).
+
+## Install
+
+termbrowse is not on npm. Install it from a checkout (Node 22 or newer, macOS or Linux):
+
+```sh
+git clone git@github.com:matthewalunni/termbrowse.git
+cd termbrowse
+npm ci
+npm link          # puts `termbrowse` on your PATH
+termbrowse doctor
+```
+
+Chrome for Testing downloads to `~/.cache/termbrowse` the first time something needs it (about 150 MB).
+
+## Three ways to use it
+
+### 1. `termbrowse <url>`: a browser in this terminal
+
+```sh
+termbrowse example.com
+termbrowse localhost:3000        # localhost and 127.0.0.1 get http://
+```
+
+This starts a Chrome for Testing of its own and draws the page in the terminal. Press `q` or Ctrl-C to quit, which closes that Chrome. The last row is a status line with the URL and frames per second, or `paused` (the pane is too small) or `disconnected` (Chrome went away). When the page opens a popup, the viewer switches to it, and when the popup closes it goes back to the page that opened it.
+
+Each run uses a fresh copy of the starter profile (see `termbrowse login`), and that copy is deleted when you quit. Signing in during a `termbrowse <url>` session lasts only for that session. You can run several at once.
+
+### 2. `termbrowse view`: watch a Chrome that is already running
+
+```sh
+termbrowse view --agent t2p             # the Chrome of agent t2p (see `termbrowse agents`)
+termbrowse view --port 9222             # any Chrome with a debugging port on 127.0.0.1
+termbrowse view --agent t2p --tab docs  # the tab whose URL or title contains "docs"
+```
+
+`--tab` picks the first tab whose URL or title contains the text, ignoring case. If no tab matches, the viewer shows the first tab.
+
+Quitting the viewer leaves that Chrome running. If the agent has no browser yet, `view --agent` says so and exits 1. An agent's Chrome only starts on its first browser action.
+
+### 3. `termbrowse mcp`: one Chrome per agent
+
+`termbrowse mcp` is an MCP server (stdio). It runs [chrome-devtools-mcp](https://github.com/ChromeDevTools/chrome-devtools-mcp) (pinned to 1.13.0) against a Chrome for Testing that belongs to one agent. That Chrome starts on the agent's first browser tool call, not when the MCP server starts. The agent's tool list is available immediately.
+
+Which agent it is, in this order: `$TERMBROWSE_AGENT`, then `$HC_TERMINAL_ID` (Herdr's terminal id), then `pid-<parent pid>`. Each agent keeps its own profile across MCP restarts, so its sign-ins and cookies stay. A new agent's profile is copied from the starter profile.
+
+Claude Code:
+
+```sh
+claude mcp add termbrowse -- termbrowse mcp
+```
+
+or in `.mcp.json`:
+
+```json
+{
+  "mcpServers": {
+    "termbrowse": { "command": "termbrowse", "args": ["mcp"] }
+  }
+}
+```
+
+Codex (`~/.codex/config.toml`):
+
+```toml
+[mcp_servers.termbrowse]
+command = "termbrowse"
+args = ["mcp"]
+```
+
+Arguments after `--` go to chrome-devtools-mcp: `termbrowse mcp -- --some-flag`.
+
+When the agent exits, its Chrome closes. If the MCP process is killed without cleaning up (SIGKILL, a crash), its Chrome is closed by the next termbrowse command that reads the list of browsers (`agents`, `stop`, `view --agent`, `mcp`, `termbrowse <url>`).
+
+## Other commands
+
+```sh
+termbrowse agents [--json]          # live Chromes: AGENT  KIND  PORT  PID  URL
+termbrowse stop --agent ID          # close one agent's Chrome
+termbrowse stop --all               # close every Chrome termbrowse started
+termbrowse login [url] [--reset]    # sign in once, for every new profile
+termbrowse doctor                   # check Node, config, Chrome, display, libraries, terminal
+termbrowse --version
+```
+
+`stop --agent` on an MCP agent closes its Chrome. The wrapper starts a new one on the agent's next browser tool call.
+
+## `termbrowse login`
+
+```sh
+termbrowse login github.com
+```
+
+This opens a normal Chrome for Testing window (even when `headless = true`) on the starter profile. Sign in to the sites your agents need, then press Enter in the terminal or close the browser window.
+
+termbrowse then prints `Saving your sign-ins…` and keeps Chrome running for 35 seconds before closing it. Chrome writes cookies to disk on a timer of about 30 seconds, not when it quits. In a test, a cookie set 3 seconds before closing never reached the disk. Ctrl-C during the wait asks once more, and a second Ctrl-C quits at once, which may lose recent sign-ins.
+
+- New agent profiles and every `termbrowse <url>` run start from a copy of this profile. Agents that already have a profile keep their own sign-ins and don't pick up new ones. To give an existing agent the new sign-ins, delete its folder under `~/.local/state/termbrowse/profiles/`.
+- `--reset` deletes the starter profile first.
+- Login needs a display. On Linux without `DISPLAY` or `WAYLAND_DISPLAY` it exits 1. Sign in on a machine with a screen instead.
+- On macOS, Chrome encrypts cookies with a key in your login Keychain. A copied profile still reads them: in a manual check, a profile copied from the starter returned the starter's cookies (`tbcheck=1`, `tbjs=1`).
+
+## Configuration
+
+termbrowse reads `$TERMBROWSE_CONFIG` or, if that is unset, `$XDG_CONFIG_HOME/termbrowse/config.toml` (default `~/.config/termbrowse/config.toml`). The file is optional. These are all the keys, with their defaults:
+
+```toml
+[chrome]
+channel = "stable"          # Chrome for Testing channel: stable, beta, dev, canary
+headless = false            # forced true on Linux with no DISPLAY / WAYLAND_DISPLAY
+window_size = "1280x800"    # agent and standalone window size, "WIDTHxHEIGHT"
+extra_args = []             # extra Chrome flags, e.g. ["--lang=en-US"]
+
+[agents]
+prune_days = 7              # delete agent profiles unused for this many days
+
+[hooks]
+on_launch = ""              # shell command run after a termbrowse Chrome starts
+```
+
+`on_launch` runs with `sh -c` once the new Chrome has a page. Its environment has these variables:
+
+- `TERMBROWSE_PID`: Chrome's pid.
+- `TERMBROWSE_PORT`: Chrome's debugging port.
+- `TERMBROWSE_AGENT`: the agent id. It is empty for `termbrowse <url>`.
+- `TERMBROWSE_KIND`: `agent` or `standalone`.
+- `TERMBROWSE_BUNDLE_ID`: `com.google.chrome.for.testing` on macOS, empty on Linux.
+
+The hook runs in the background, so it doesn't delay the agent or the viewer. A hook that fails is logged to `~/.local/state/termbrowse/logs/hook.log`, and it never stops termbrowse. A hook that runs longer than 10 seconds is killed along with its children, so start longer work with `nohup` or `setsid`. Window-manager recipes (AeroSpace, yabai, Hyprland) are in [docs/hooks.md](docs/hooks.md).
+
+Other environment variables:
+
+| Variable | Effect |
+| --- | --- |
+| `TERMBROWSE_AGENT` | agent id for `termbrowse mcp` (overrides `HC_TERMINAL_ID`) |
+| `TERMBROWSE_ASSUME_KITTY=1` | treat the terminal as able to draw Kitty graphics without asking it |
+| `TERMBROWSE_CONFIG` | path of the config file |
+| `XDG_STATE_HOME` | state: registry, profiles, logs (default `~/.local/state/termbrowse`) |
+| `XDG_CACHE_HOME` | Chrome for Testing downloads (default `~/.cache/termbrowse`) |
+
+## Terminal support
+
+The viewer needs the Kitty graphics protocol. Before drawing, termbrowse checks the terminal:
+
+1. It recognises Herdr (`HC_TERMINAL_ID`), Kitty (`KITTY_WINDOW_ID`, `TERM=xterm-kitty`), Ghostty (`TERM=xterm-ghostty`, `TERM_PROGRAM=ghostty`) and WezTerm (`TERM_PROGRAM=WezTerm`) from their environment variables.
+2. If it doesn't recognise the terminal, it sends the Kitty graphics query and waits for an answer.
+
+Herdr draws Kitty graphics but doesn't answer the query, which is why step 1 exists. If your terminal draws Kitty graphics but isn't recognised and doesn't answer, set `TERMBROWSE_ASSUME_KITTY=1`. In a terminal without Kitty graphics, the viewer prints a message and exits 2 without drawing anything.
+
+| Terminal | Status |
+| --- | --- |
+| Herdr (macOS) | tested (automated); not yet confirmed by eye on screen |
+| Herdr terminal on a remote Linux machine | the viewer runs and writes frames (31 fps measured on `dev`); not yet confirmed that the image shows up on the Mac |
+| Kitty, Ghostty, WezTerm | expected to work, not tested |
+| macOS Terminal.app, iTerm2 | not supported (no Kitty graphics); the viewer refuses to start |
+
+The image is drawn at the pane's real pixel size (1×, never Retina 2×) from PNG frames. Large frames lower the frame rate automatically.
+
+## Herdr
+
+- In a Herdr terminal, the agent id is the terminal's id (`HC_TERMINAL_ID`, e.g. `t2p`). An agent running `termbrowse mcp` from that terminal gets a Chrome named after it, so `termbrowse agents` lists it as `t2p`.
+- To watch an agent's browser in a pane next to it, run this from the agent's pane (or add `--pane <id>`):
+
+  ```sh
+  herdr-app do pane.split --direction right \
+    --argv "[\"termbrowse\",\"view\",\"--agent\",\"$HC_TERMINAL_ID\"]"
+  ```
+
+  If the agent hasn't opened a browser yet, the viewer says so and exits. Run it again after the agent's first browser action.
+- Closing a pane sends SIGHUP. The viewer and `termbrowse mcp` both handle it: they close their Chrome and restore the terminal.
+
+## Linux
+
+termbrowse was checked on a headless Debian 13 (trixie) x86_64 machine (Herdr's `dev`):
+
+- Node: Debian's `/usr/bin/node` is 20.19.2, which is too old. `doctor` reports `Node: fail (20.19.2; termbrowse needs 22 or newer)`. Use Node 22 or newer from nvm, NodeSource or similar. The check used Node 26.13.1 from nvm.
+- Chrome libraries: a minimal Debian lacks the shared libraries Chrome needs. `doctor` lists the missing ones from `ldd`. On Debian 13 they were:
+
+  ```sh
+  sudo apt-get install --no-install-recommends libnspr4 libnss3 libatk1.0-0t64 \
+    libatk-bridge2.0-0t64 libcups2t64 libxkbcommon0 libasound2t64 libcairo2 \
+    libpango-1.0-0 libxdamage1 libatspi2.0-0t64
+  ```
+
+  On Debian 12 or Ubuntu 22.04, drop the `t64` suffixes.
+- No display: with neither `DISPLAY` nor `WAYLAND_DISPLAY`, Chrome always runs headless (`--headless=new`), and `doctor` warns about it. `termbrowse login` can't run there, because it needs a window.
+- On Linux, Chrome runs with `--password-store=basic`, so it doesn't need a desktop keyring.
+- With Node 26 and those libraries, the full test suite passed (111/111). `termbrowse https://example.com` ran in a Herdr terminal on that machine: Chrome was headless, the status row showed 31 fps on an animated page, and quitting left no Chrome or profile behind.
+
+## Security
+
+- Chrome for Testing is a real, current Chrome. termbrowse resolves the channel's current build each time it starts a Chrome and downloads it if needed, so you get new security fixes.
+- Every debugging port binds to `127.0.0.1` only. It is never reachable from the network.
+- A debugging port has no password. **Any program or user on the same machine can connect to it** and fully control that Chrome, including its signed-in sessions. Don't sign in to accounts you wouldn't let local processes use, and don't run termbrowse on a machine shared with people you don't trust.
+- Profiles (with cookies) live under `~/.local/state/termbrowse/`. Treat that folder like a password store.
+
+## License
+
+MIT
