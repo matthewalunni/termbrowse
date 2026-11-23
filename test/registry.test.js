@@ -178,3 +178,18 @@ test('an orphaned entry whose pid now names an unrelated, later process is dropp
     sleeper.kill('SIGKILL');
   }
 });
+
+test('removeEntry also removes the agent\'s control file', async () => {
+  const { controlPath } = await import('../src/paths.js');
+  const p = await tmpPaths();
+  await upsertEntry(entry('a'), p);
+  await upsertEntry(entry('b'), p);
+  for (const id of ['a', 'b']) {
+    await fs.mkdir(path.dirname(controlPath(id, p)), { recursive: true });
+    await fs.writeFile(controlPath(id, p), '{}');
+  }
+  await removeEntry('a', p);
+  await assert.rejects(fs.access(controlPath('a', p)));
+  await fs.access(controlPath('b', p));
+  await removeEntry('nope', p); // no control file: fine
+});

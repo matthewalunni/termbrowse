@@ -1,7 +1,7 @@
 import fs from 'node:fs/promises';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { paths, ensureStateDir } from './paths.js';
+import { paths, ensureStateDir, controlPath } from './paths.js';
 import { browserVersion } from './cdp.js';
 
 const LOCK_RETRY_MS = 20;
@@ -149,8 +149,13 @@ export async function readRegistry(p = paths()) {
 export const upsertEntry = (e, p = paths()) =>
   modify(p, (list) => [...list.filter((x) => x.agentId !== e.agentId), e]);
 
+// The agent's control file (control.js) goes with its entry, under the same lock.
 export const removeEntry = (agentId, p = paths()) =>
-  modify(p, (list) => list.filter((x) => x.agentId !== agentId));
+  withLock(p, async () => {
+    const { list } = await load(p, true);
+    await save(list.filter((x) => x.agentId !== agentId), p);
+    await fs.unlink(controlPath(agentId, p)).catch((e) => { if (e.code !== 'ENOENT') throw e; });
+  });
 
 export async function findEntry(agentId, p = paths()) {
   return (await readRegistry(p)).find((e) => e.agentId === agentId) ?? null;

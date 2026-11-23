@@ -1,6 +1,6 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import { paths, ensureStateDir } from './paths.js';
+import { paths, ensureStateDir, sanitize } from './paths.js';
 import { readRegistry, alive as pidAlive } from './registry.js';
 
 const MARKER = '.termbrowse-last-used';
@@ -9,10 +9,7 @@ const SKIP_DIRS = new Set(['Cache', 'Code Cache', 'GPUCache']);
 
 let tmpSeq = 0;
 
-export const sanitize = (id) => {
-  const s = String(id).replace(/[^A-Za-z0-9._-]/g, '_');
-  return s === '' || s === '.' || s === '..' ? '_' : s;
-};
+export { sanitize };
 
 async function copyFilter(src) {
   const name = path.basename(src);

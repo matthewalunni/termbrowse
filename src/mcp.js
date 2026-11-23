@@ -4,10 +4,15 @@
 // Chrome starts lazily. chrome-devtools-mcp 1.13.0 only connects to --browserUrl when a tool
 // runs (checked: with nothing listening it still answers initialize and tools/list), so the
 // child starts at once and Chrome is launched just before the first tools/call is forwarded.
+//
+// While the user holds control of this agent's browser in a viewer (control.js), tools/call
+// requests wait here, unforwarded; other messages still pass. The first result after a takeover
+// carries a note telling the agent the page may have changed.
 import { spawn } from 'node:child_process';
+import { watch } from 'node:fs';
 import { createRequire } from 'node:module';
 import { dirname, join } from 'node:path';
-import { paths } from './paths.js';
+import { paths, controlPath } from './paths.js';
 import { loadConfig, effectiveHeadless } from './config.js';
 import { freePort, launchChrome } from './chrome.js';
 import { runHook } from './hook.js';
@@ -15,10 +20,13 @@ import { agentProfile, pruneProfiles } from './profiles.js';
 import { findEntry, upsertEntry, removeEntry } from './registry.js';
 import { listTargets } from './cdp.js';
 import { agentId } from './agent-id.js';
+import { readControl, setAgentBusy } from './control.js';
 
 const require = createRequire(import.meta.url);
 const STOP_GRACE_MS = 2000; // after stdin ends, before SIGTERM
 const KILL_GRACE_MS = 3000; // after SIGTERM, before SIGKILL
+const CONTROL_POLL_MS = 1000; // fallback re-check of the control file while a call waits
+const WAIT_ERROR = { code: -32000, message: 'termbrowse: the user has control of the browser; try again later' };
 
 const log = (msg) => process.stderr.write(`termbrowse mcp: ${msg}\n`);
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -57,6 +65,35 @@ function parse(line) {
 }
 
 const isToolsCall = (msg) => (Array.isArray(msg) ? msg : [msg]).some((m) => m?.method === 'tools/call');
+const isResponse = (m) => m && typeof m === 'object' && m.method === undefined && m.id !== undefined && ('result' in m || 'error' in m);
+
+const formatDuration = (ms) => {
+  const s = Math.max(1, Math.round(ms / 1000));
+  return s < 60 ? `${s} s` : `${Math.round(s / 60)} min`;
+};
+
+export const takeoverNote = ({ durationMs, waited, url }) =>
+  `Note from termbrowse: the user took control of this browser for ${formatDuration(durationMs)} `
+  + `(${waited ? 'while you waited' : 'since your last action'}). The page may have changed; it is now at ${url}. `
+  + 'Re-check the page (e.g. take a snapshot) before continuing.';
+
+// Adds the note to one response object: a text item on result.content, or, on a JSON-RPC error
+// (which has no content), error.data.note with the error otherwise unchanged.
+function addNote(m, note) {
+  if (m.error && typeof m.error === 'object') {
+    const { data } = m.error;
+    m.error.data = data && typeof data === 'object' && !Array.isArray(data) ? { ...data, note } : { ...(data !== undefined && { value: data }), note };
+  } else if (m.result && typeof m.result === 'object') {
+    m.result.content = [...(Array.isArray(m.result.content) ? m.result.content : []), { type: 'text', text: note }];
+  }
+}
+
+export function appendNote(responseLine, note) {
+  const msg = parse(responseLine);
+  if (!isResponse(msg)) return responseLine;
+  addNote(msg, note);
+  return `${JSON.stringify(msg)}${responseLine.endsWith('\n') ? '\n' : ''}`;
+}
 
 // chrome-devtools-mcp's new_page defaults to background: false, which brings the tab to the
 // front and activates Chrome (a window manager then jumps to its workspace). When the agent
@@ -101,6 +138,44 @@ export async function runMcp(
   const headless = effectiveHeadless(cfg, env);
   // Same condition as the background launch (see launchPlan in chrome.js).
   const backgroundTabs = cfg.chrome.background && !headless && process.platform === 'darwin';
+
+  // Control. A failed read (e.g. a stuck lock) counts as released: an agent is never blocked by it.
+  const control = () => readControl(id, p).catch((err) => {
+    log(`could not read the control file: ${err.message}`);
+    return null;
+  });
+  // Takeovers counted so far, so each is reported once. Starts from the file, so a takeover from
+  // before this wrapper isn't news to a fresh agent (one still in progress is, once it ends).
+  let reported = null;
+  const baseline = (c) => {
+    if (reported === null) reported = c.held ? c.takeovers - 1 : c.takeovers;
+  };
+  const initial = await control();
+  if (initial) baseline(initial);
+  let busyChain = Promise.resolve();
+  const setBusy = (busy) =>
+    (busyChain = busyChain.then(() => setAgentBusy(id, busy, p)).catch((err) => log(`could not update the control file: ${err.message}`)));
+
+  async function currentUrl() {
+    const targets = await listTargets(port).catch(() => []);
+    return targets.find((t) => t.type === 'page')?.url ?? 'an unknown page';
+  }
+
+  // The note for a tools/call response, if a takeover ended since the last one reported.
+  async function takeoverNoteNow(waited) {
+    const c = await control();
+    if (!c) return null;
+    if (reported === null) {
+      baseline(c);
+      return null;
+    }
+    if (c.held) return null; // the user took control mid-call: told once it ends
+    if (c.takeovers < reported) reported = 0; // the file was removed and started over
+    if (c.takeovers <= reported || !c.lastTakeover) return null;
+    reported = c.takeovers;
+    const t = c.lastTakeover;
+    return takeoverNote({ durationMs: t.until - t.since, waited, url: t.url ?? (await currentUrl()) });
+  }
 
   async function announce(c) {
     if (!cfg.hooks.onLaunch) return;
@@ -153,8 +228,33 @@ export async function runMcp(
   stdout.on('error', onStdoutError);
 
   // Output: whole lines only, so a reply we write ourselves never lands inside one of the child's.
-  const out = (line) => stdout.write(line);
-  const output = lineSplitter(out);
+  // Lines go out in order through one chain, since a tools/call response first waits for the
+  // control file (busy flag, takeover note).
+  const inFlight = new Map(); // forwarded tools/call id -> whether it waited for the user
+  let outChain = Promise.resolve();
+  const emit = (fn) => {
+    outChain = outChain.then(fn).catch((err) => log(`output failed: ${err.message}`));
+  };
+  const out = (line) => emit(() => stdout.write(line));
+  const reply = (id_, error) => out(`${JSON.stringify({ jsonrpc: '2.0', id: id_, error })}\n`);
+
+  async function fromChild(line) {
+    const msg = parse(line);
+    const done = (Array.isArray(msg) ? msg : [msg]).filter((m) => isResponse(m) && inFlight.has(m.id));
+    if (!done.length) return stdout.write(line);
+    let waited = false;
+    for (const m of done) {
+      waited ||= inFlight.get(m.id);
+      inFlight.delete(m.id);
+    }
+    if (!inFlight.size) await setBusy(false);
+    const note = await takeoverNoteNow(waited);
+    if (!note) return stdout.write(line);
+    if (!Array.isArray(msg)) return stdout.write(appendNote(line, note));
+    addNote(done[0], note);
+    return stdout.write(`${JSON.stringify(msg)}\n`);
+  }
+  const output = lineSplitter((line) => emit(() => fromChild(line)));
   child.stdout.setEncoding('utf8');
   child.stdout.on('data', (d) => output.push(d));
   child.stdout.on('end', () => output.flush());
@@ -162,6 +262,7 @@ export async function runMcp(
   // Input: forwarded strictly in order; while Chrome starts, later lines wait in the queue.
   const queue = [];
   let pumping = null;
+  let held = null; // the tools/call waiting for the user: { id, cancelled, wake }
   let inputEnded = false;
   let stopping = false;
   let killedByUs = false;
@@ -170,6 +271,7 @@ export async function runMcp(
   function stop() {
     if (stopping) return;
     stopping = true;
+    held?.wake();
     child.stdin.end();
     killTimer = setTimeout(() => {
       killedByUs = true;
@@ -178,24 +280,102 @@ export async function runMcp(
     }, stopGraceMs);
   }
 
+  const callIds = (msg) => (Array.isArray(msg) ? msg : [msg]).filter((m) => m?.method === 'tools/call' && m.id !== undefined).map((m) => m.id);
+
+  // A line that need not wait behind a held call. A cancellation of a call that hasn't been
+  // forwarded drops that call (it never gets a reply, per MCP) and isn't forwarded itself.
+  function passNow(line, msg) {
+    if (msg?.method === 'notifications/cancelled' && msg.params?.requestId !== undefined) {
+      const rid = msg.params.requestId;
+      if (held && held.id === rid) {
+        held.cancelled = true;
+        held.wake();
+        return;
+      }
+      const i = queue.findIndex((l) => {
+        const m = parse(l);
+        return m?.method === 'tools/call' && m.id === rid;
+      });
+      if (i >= 0) {
+        queue.splice(i, 1);
+        return;
+      }
+    }
+    child.stdin.write(line);
+  }
+
+  // Waits while the user holds control. Resolves 'free' (never held), 'waited' (released),
+  // 'cancelled', 'ended' (input closed or stopping) or 'timeout' (max_wait).
+  async function untilReleased(msg) {
+    if (!(await control())?.held) return 'free';
+    const start = Date.now();
+    const h = { id: Array.isArray(msg) ? undefined : msg.id, cancelled: false, wake: () => {} };
+    held = h;
+    // Lines already queued behind this call that need not wait go now.
+    const rest = queue.splice(0);
+    for (const l of rest) {
+      const m = parse(l);
+      if (m !== undefined && isToolsCall(m)) queue.push(l);
+      else passNow(l, m);
+    }
+    let watcher = null;
+    try {
+      watcher = watch(dirname(controlPath(id, p)), () => h.wake());
+      watcher.on('error', () => {});
+    } catch {
+      // the 1 s poll still notices
+    }
+    try {
+      for (;;) {
+        const left = cfg.control.maxWaitMs - (Date.now() - start);
+        if (h.cancelled) return 'cancelled';
+        if (stopping || inputEnded) return 'ended';
+        if (left <= 0) return 'timeout';
+        let timer;
+        await new Promise((r) => {
+          h.wake = r;
+          timer = setTimeout(r, Math.min(CONTROL_POLL_MS, left));
+        });
+        clearTimeout(timer);
+        if (h.cancelled) return 'cancelled';
+        if (!(await control())?.held) return 'waited';
+      }
+    } finally {
+      held = null;
+      watcher?.close();
+    }
+  }
+
   async function drain() {
     while (queue.length && !stopping) {
       const line = queue.shift();
       const msg = parse(line);
-      if (msg !== undefined && isToolsCall(msg)) {
+      const call = msg !== undefined && isToolsCall(msg);
+      let waited = false;
+      if (call) {
+        const r = await untilReleased(msg);
+        if (r === 'cancelled' || r === 'ended') continue;
+        if (r === 'timeout') {
+          for (const cid of callIds(msg)) reply(cid, WAIT_ERROR);
+          continue;
+        }
+        waited = r === 'waited';
         try {
           await ensureChrome();
         } catch (err) {
           log(`could not start Chrome: ${err.message}`);
           if (!Array.isArray(msg)) {
             // A notification (no id) gets no reply, even an error; it is dropped.
-            if (msg.id !== undefined) {
-              out(`${JSON.stringify({ jsonrpc: '2.0', id: msg.id, error: { code: -32000, message: `termbrowse: could not start Chrome: ${err.message}` } })}\n`);
-            }
+            if (msg.id !== undefined) reply(msg.id, { code: -32000, message: `termbrowse: could not start Chrome: ${err.message}` });
             continue;
           }
           // A batch goes through anyway; chrome-devtools-mcp reports the missing browser per call.
         }
+      }
+      if (call) {
+        const ids = callIds(msg);
+        if (ids.length && !inFlight.size) await setBusy(true);
+        for (const cid of ids) inFlight.set(cid, waited);
       }
       child.stdin.write(backgroundTabs && msg !== undefined ? backgroundNewPages(line) : line);
     }
@@ -210,6 +390,10 @@ export async function runMcp(
   }
 
   const input = lineSplitter((line) => {
+    if (held) {
+      const msg = parse(line);
+      if (msg === undefined || !isToolsCall(msg)) return passNow(line, msg);
+    }
     queue.push(line);
     pump();
   });
@@ -217,6 +401,7 @@ export async function runMcp(
   const onEnd = () => {
     input.flush();
     inputEnded = true;
+    held?.wake();
     if (!pumping) stop();
   };
   stdin.setEncoding('utf8');
@@ -234,6 +419,7 @@ export async function runMcp(
   stdin.off('end', onEnd);
   stdin.pause();
   await pumping; // a launch in flight finishes, so its Chrome is closed below too
+  await outChain;
 
   if (chrome) {
     const c = chrome;

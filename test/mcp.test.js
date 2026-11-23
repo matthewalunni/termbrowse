@@ -9,6 +9,8 @@ import { agentId } from '../src/agent-id.js';
 import { paths } from '../src/paths.js';
 import { readRegistry, findEntry } from '../src/registry.js';
 import { listTargets } from '../src/cdp.js';
+import { takeControl, releaseControl, readControl, controlPath } from '../src/control.js';
+import { takeoverNote, appendNote } from '../src/mcp.js';
 
 const skip = process.env.TERMBROWSE_SKIP_CHROME === '1' ? 'TERMBROWSE_SKIP_CHROME=1' : false;
 const BIN = fileURLToPath(new URL('../bin/termbrowse.js', import.meta.url));
@@ -322,4 +324,170 @@ test('backgroundNewPages: new_page without background gets background: true', as
   ])}\n`));
   assert.equal(batch[0].params.arguments.background, true);
   assert.deepEqual(batch[1].params.arguments, {});
+});
+
+const NOTE = /^Note from termbrowse: the user took control of this browser for /;
+const notes = (r) => (r.result?.content ?? []).filter((c) => c.type === 'text' && NOTE.test(c.text)).map((c) => c.text);
+const WAIT_ERROR = { code: -32000, message: 'termbrowse: the user has control of the browser; try again later' };
+
+test('takeoverNote: exact text, seconds and minutes', () => {
+  assert.equal(
+    takeoverNote({ durationMs: 40000, waited: true, url: 'https://x/' }),
+    'Note from termbrowse: the user took control of this browser for 40 s (while you waited). The page may have changed; it is now at https://x/. Re-check the page (e.g. take a snapshot) before continuing.',
+  );
+  assert.equal(
+    takeoverNote({ durationMs: 180000, waited: false, url: 'https://y/' }),
+    'Note from termbrowse: the user took control of this browser for 3 min (since your last action). The page may have changed; it is now at https://y/. Re-check the page (e.g. take a snapshot) before continuing.',
+  );
+  assert.match(takeoverNote({ durationMs: 200, waited: false, url: 'u' }), / for 1 s /);
+  assert.match(takeoverNote({ durationMs: 59400, waited: false, url: 'u' }), / for 59 s /);
+  assert.match(takeoverNote({ durationMs: 90000, waited: false, url: 'u' }), / for 2 min /);
+});
+
+test('appendNote: one text item on a result; error.data.note on an error', () => {
+  const ok = JSON.parse(appendNote(`${JSON.stringify({ jsonrpc: '2.0', id: 3, result: { content: [{ type: 'text', text: 'a' }] } })}\n`, 'N'));
+  assert.deepEqual(ok.result.content, [{ type: 'text', text: 'a' }, { type: 'text', text: 'N' }]);
+  assert.ok(appendNote(`${JSON.stringify({ jsonrpc: '2.0', id: 3, result: {} })}\n`, 'N').endsWith('\n'));
+  assert.deepEqual(JSON.parse(appendNote(JSON.stringify({ jsonrpc: '2.0', id: 3, result: {} }), 'N')).result.content, [{ type: 'text', text: 'N' }]);
+  const tool = JSON.parse(appendNote(JSON.stringify({ jsonrpc: '2.0', id: 3, result: { isError: true, content: [] } }), 'N'));
+  assert.deepEqual(tool.result, { isError: true, content: [{ type: 'text', text: 'N' }] });
+  const err = JSON.parse(appendNote(JSON.stringify({ jsonrpc: '2.0', id: 3, error: { code: 1, message: 'm', data: { x: 1 } } }), 'N'));
+  assert.deepEqual(err.error, { code: 1, message: 'm', data: { x: 1, note: 'N' } });
+  assert.deepEqual(JSON.parse(appendNote(JSON.stringify({ jsonrpc: '2.0', id: 3, error: { code: 1, message: 'm' } }), 'N')).error.data, { note: 'N' });
+  assert.equal(appendNote('not json\n', 'N'), 'not json\n');
+});
+
+// The viewer's side of a takeover, from this (live) test process.
+const take = (agent, url = 'https://x/') => takeControl(agent, { viewerPid: process.pid, url, idleReturnMs: 60_000 }, p);
+const noReplyFor = async (w, id, ms) => { await sleep(ms); return !w.lines.some((m) => m.id === id); };
+
+test('a tools/call waits while the user holds control; pings pass; the note comes after release', { skip, timeout: 120_000 }, async () => {
+  const w = new Wrapper('test-w');
+  await w.init();
+  const first = await w.call('list_pages');
+  assert.ok(!first.error && !first.result.isError, JSON.stringify(first));
+  assert.deepEqual(notes(first), []);
+  await take('test-w');
+  let got = null;
+  const held = w.call('list_pages').then((r) => (got = r));
+  await sleep(1000);
+  assert.equal(got, null, 'a held call was answered');
+  const ping = await w.request('ping', undefined, 5000);
+  assert.deepEqual(ping.result, {});
+  assert.equal(got, null);
+  await releaseControl('test-w', { url: 'https://x/after' }, p);
+  const t0 = Date.now();
+  const r = await held;
+  assert.ok(Date.now() - t0 < 1500, 'release was not noticed promptly');
+  assert.ok(!r.error && !r.result.isError, JSON.stringify(r));
+  const n = notes(r);
+  assert.equal(n.length, 1, JSON.stringify(r));
+  assert.match(n[0], /^Note from termbrowse: the user took control of this browser for [12] s \(while you waited\)\. The page may have changed; it is now at https:\/\/x\/after\. Re-check the page \(e\.g\. take a snapshot\) before continuing\.$/);
+  assert.deepEqual(notes(await w.call('list_pages')), [], 'a takeover is reported once');
+  w.child.stdin.end();
+  assert.equal(await w.exit, 0);
+  await assert.rejects(stat(controlPath('test-w', p)), 'control file removed with the registry entry');
+});
+
+test('stale control from a dead viewer pid does not block', { skip, timeout: 120_000 }, async () => {
+  const w = new Wrapper('test-s');
+  await w.init();
+  assert.ok(!(await w.call('list_pages')).result.isError);
+  const dead = spawn(process.execPath, ['-e', '']);
+  await new Promise((r) => dead.once('exit', r));
+  const now = Date.now();
+  await mkdir(join(p.state, 'control'), { recursive: true });
+  await writeFile(controlPath('test-s', p), JSON.stringify({
+    holder: 'user', viewerPid: dead.pid, url: 'https://dead/', idleReturnMs: 60_000,
+    since: now - 5000, lastInput: now - 1000, takeovers: 1, lastTakeover: null, agentBusySince: null,
+  }));
+  const t0 = Date.now();
+  const r = await w.call('list_pages');
+  assert.ok(Date.now() - t0 < 5000, `took ${Date.now() - t0} ms`);
+  assert.ok(!r.error && !r.result.isError, JSON.stringify(r));
+  const n = notes(r);
+  assert.equal(n.length, 1, JSON.stringify(r));
+  assert.match(n[0], / for 4 s \(since your last action\)\. .* now at https:\/\/dead\/\. /);
+  w.child.stdin.end();
+  assert.equal(await w.exit, 0);
+});
+
+test('a takeover with no call pending is reported on the next result, once; an old one never', { skip, timeout: 120_000 }, async () => {
+  // A takeover from before this wrapper started is not news to a fresh agent.
+  await mkdir(join(p.state, 'control'), { recursive: true });
+  await writeFile(controlPath('test-t', p), JSON.stringify({
+    holder: null, takeovers: 3, lastTakeover: { since: 1000, until: 61000, url: 'https://old/' }, agentBusySince: null,
+  }));
+  const w = new Wrapper('test-t');
+  await w.init();
+  const first = await w.call('list_pages');
+  assert.ok(!first.error && !first.result.isError, JSON.stringify(first));
+  assert.deepEqual(notes(first), []);
+  await take('test-t', 'https://y/');
+  await sleep(200);
+  await releaseControl('test-t', { url: 'https://y/' }, p);
+  const r = await w.call('list_pages');
+  const n = notes(r);
+  assert.equal(n.length, 1, JSON.stringify(r));
+  assert.match(n[0], / for 1 s \(since your last action\)\. .* now at https:\/\/y\/\. /);
+  assert.deepEqual(notes(await w.call('list_pages')), []);
+  w.child.stdin.end();
+  assert.equal(await w.exit, 0);
+});
+
+test('a held call that is cancelled is never forwarded; later calls work', { skip, timeout: 120_000 }, async () => {
+  const w = new Wrapper('test-x');
+  await w.init();
+  assert.ok(!(await w.call('list_pages')).result.isError);
+  await take('test-x');
+  w.child.stdin.write(`${JSON.stringify({ jsonrpc: '2.0', id: 500, method: 'tools/call', params: { name: 'new_page', arguments: { url: 'data:text/html,<title>cancelled</title>' } } })}\n`);
+  await sleep(300);
+  w.notify('notifications/cancelled', { requestId: 500, reason: 'test' });
+  assert.deepEqual((await w.request('ping', undefined, 5000)).result, {});
+  await releaseControl('test-x', { url: 'https://x/' }, p);
+  const r = await w.call('list_pages');
+  assert.ok(!r.error && !r.result.isError, JSON.stringify(r));
+  assert.ok(!text(r).includes('cancelled'), 'the cancelled new_page ran');
+  assert.ok(await noReplyFor(w, 500, 500), 'the cancelled call got a reply');
+  const e = await findEntry('test-x', p);
+  assert.ok(!(await listTargets(e.port)).some((t) => t.title === 'cancelled'));
+  w.child.stdin.end();
+  assert.equal(await w.exit, 0);
+});
+
+test('a call held longer than max_wait gets the wait error and is dropped', { skip, timeout: 60_000 }, async () => {
+  const cfgFile = join(tmp, 'maxwait.toml');
+  await writeFile(cfgFile, '[chrome]\nheadless = true\n\n[control]\nmax_wait = "300ms"\n');
+  await take('test-m');
+  const w = new Wrapper('test-m', { TERMBROWSE_CONFIG: cfgFile });
+  try {
+    await w.init();
+    const t0 = Date.now();
+    const r = await w.call('list_pages');
+    assert.ok(Date.now() - t0 >= 300, `answered after ${Date.now() - t0} ms`);
+    assert.deepEqual(r.error, WAIT_ERROR);
+    assert.equal(await findEntry('test-m', p), null, 'the dropped call started Chrome');
+  } finally {
+    await releaseControl('test-m', {}, p);
+    w.child.stdin.end();
+    await w.exit;
+  }
+});
+
+test('agentBusySince is set while a call is in flight and cleared by its response', { skip, timeout: 120_000 }, async () => {
+  const w = new Wrapper('test-y');
+  await w.init();
+  const pages = await w.call('list_pages');
+  assert.ok(!pages.result.isError);
+  const pageId = Number(/^(\d+):/m.exec(text(pages))?.[1]);
+  assert.ok(pageId, text(pages));
+  assert.equal((await readControl('test-y', p)).agentBusySince, null);
+  const slow = w.call('evaluate_script', { pageId, function: '() => new Promise((r) => setTimeout(() => r(1), 1500))' });
+  assert.ok(await until(async () => typeof (await readControl('test-y', p)).agentBusySince === 'number', 3000), 'never busy');
+  const r = await slow;
+  assert.ok(!r.error && !r.result.isError, JSON.stringify(r));
+  assert.match(text(r), /\b1\b/);
+  assert.equal((await readControl('test-y', p)).agentBusySince, null);
+  w.child.stdin.end();
+  assert.equal(await w.exit, 0);
 });

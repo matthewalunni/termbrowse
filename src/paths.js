@@ -17,6 +17,15 @@ export function paths(env = process.env) {
   };
 }
 
+// An id as a single safe path component (agent profiles, control files).
+export const sanitize = (id) => {
+  const s = String(id).replace(/[^A-Za-z0-9._-]/g, '_');
+  return s === '' || s === '.' || s === '..' ? '_' : s;
+};
+
+// Per-agent control file (see control.js).
+export const controlPath = (agentId, p = paths()) => join(p.state, 'control', `${sanitize(agentId)}.json`);
+
 // The state dir holds profiles with cookies, so it is private to the user. chmod as well as
 // mkdir: an install from before this existed has it world-readable.
 export async function ensureStateDir(p = paths()) {

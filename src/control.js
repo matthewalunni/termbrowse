@@ -4,11 +4,10 @@
 // the file itself is replaced atomically (tmp + rename) so unlocked readers never see a torn file.
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import { paths, ensureStateDir } from './paths.js';
+import { paths, ensureStateDir, controlPath } from './paths.js';
 import { alive, withLock } from './registry.js';
-import { sanitize } from './profiles.js';
 
-export const controlPath = (agentId, p = paths()) => path.join(p.state, 'control', `${sanitize(agentId)}.json`);
+export { controlPath };
 
 async function load(file) {
   try {
