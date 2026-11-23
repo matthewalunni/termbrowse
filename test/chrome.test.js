@@ -266,23 +266,59 @@ test('an install lock held by a live pid is waited on, with one notice', async (
   assert.equal(err.text().split(WAIT_MSG).length - 1, 1, 'printed once');
 });
 
-test('the install lock records the holder pid and its mtime is refreshed during a long install', async () => {
-  const p = await cachePaths();
-  const { stat: st } = await import('node:fs/promises');
+// A fake install that runs 300 ms with its lock aged a minute, reporting download progress
+// every 20 ms or not at all; returns the lock's pid text and mtimes before and after.
+async function longInstall(p, buildId, progress) {
+  const { stat: st, utimes } = await import('node:fs/promises');
   const seen = {};
-  const installer = async ({ buildId }) => {
+  const installer = async (opts) => {
     seen.pid = (await readFile(lockFile(p), 'utf8')).trim();
     const old = new Date(Date.now() - 60_000);
-    const { utimes } = await import('node:fs/promises');
     await utimes(lockFile(p), old, old); // as if the download had been running a while
     seen.before = (await st(lockFile(p))).mtimeMs;
+    let bytes = 0;
+    const tick = progress ? setInterval(() => opts.downloadProgressCallback((bytes += 1000), 100_000), 20) : null;
     await new Promise((r) => setTimeout(r, 300));
+    clearInterval(tick);
+    await new Promise((r) => setTimeout(r, 20)); // let a last touch land
     seen.after = (await st(lockFile(p))).mtimeMs;
-    return { executablePath: await fakeInstalled(p, buildId) };
+    return { executablePath: await fakeInstalled(p, opts.buildId) };
   };
-  await ensureChrome(cfgStable, p, { resolve: async () => '14.0.0.0', installer, lockRefreshMs: 50, stderr: sink() });
+  await ensureChrome(cfgStable, p, { resolve: async () => buildId, installer, lockRefreshMs: 50, stderr: sink() });
+  return seen;
+}
+
+test('the install lock records the holder pid and its mtime is refreshed as the download progresses', async () => {
+  const p = await cachePaths();
+  const seen = await longInstall(p, '14.0.0.0', true);
   assert.equal(seen.pid, String(process.pid));
   assert.ok(seen.after - seen.before > 30_000, `mtime not refreshed: ${seen.before} -> ${seen.after}`);
+});
+
+test('a stalled download (no progress) does not keep its install lock fresh', async () => {
+  const p = await cachePaths();
+  const seen = await longInstall(p, '14.0.0.1', false);
+  assert.equal(seen.after, seen.before, 'refreshed without progress');
+});
+
+test('if the pid cannot be written into the install lock, the lock is removed', async () => {
+  const p = await cachePaths();
+  const { open: openFile, mkdir: mk } = await import('node:fs/promises');
+  await mk(join(p.cache, 'browsers'), { recursive: true });
+  const probe = await openFile(join(p.cache, 'probe'), 'w');
+  const proto = Object.getPrototypeOf(probe);
+  await probe.close();
+  const real = proto.writeFile;
+  proto.writeFile = async function () { throw Object.assign(new Error('ENOSPC: no space left on device'), { code: 'ENOSPC' }); };
+  try {
+    await assert.rejects(
+      ensureChrome(cfgStable, p, { resolve: async () => '16.0.0.0', installer: () => { throw new Error('no'); }, stderr: sink() }),
+      /ENOSPC/,
+    );
+  } finally {
+    proto.writeFile = real;
+  }
+  await assert.rejects(access(lockFile(p)), 'lock left behind');
 });
 
 // --- version lookup cap: short only when a build is already installed ---

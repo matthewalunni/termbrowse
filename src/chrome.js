@@ -29,8 +29,8 @@ export async function findChrome(cfg, p = paths()) {
 
 const RESOLVE_TIMEOUT_MS = 3000; // a build is installed: don't hold up a start for the network
 const FRESH_RESOLVE_TIMEOUT_MS = 60_000; // nothing installed: the lookup is the only way forward
-const INSTALL_LOCK_STALE_MS = 10 * 60_000; // backstop: a lock not refreshed for this long is dead
-const INSTALL_LOCK_REFRESH_MS = 30_000; // the holder touches the lock this often while it downloads
+const INSTALL_LOCK_STALE_MS = 10 * 60_000; // a lock not refreshed for this long is dead (or stalled)
+const INSTALL_LOCK_REFRESH_MS = 30_000; // the holder touches the lock at most this often, on download progress
 const INSTALL_LOCK_RETRY_MS = 200;
 const WAITING_NOTICE = 'termbrowse: waiting for another termbrowse to finish downloading Chrome…\n';
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -78,8 +78,9 @@ async function breakLock(lock, sawPid) {
 
 // Exclusive-create lock in the cache dir, so concurrent starts download a build only once.
 // The lock holds the holder's pid: a lock whose holder is dead (Ctrl-C, SIGKILL mid-download)
-// is taken over at once. The holder refreshes its mtime while it works, so the age rule only
-// catches a holder that is alive but stuck (or a lock with no readable pid).
+// is taken over at once. fn gets touch(), which the holder calls as its download progresses:
+// it refreshes the lock's mtime (at most every refreshMs), so a download that is moving is
+// never taken over, while one that has stalled lets its lock go stale after staleMs.
 async function withInstallLock(cacheDir, fn, { staleMs, refreshMs, stderr }) {
   await mkdir(cacheDir, { recursive: true });
   const lock = join(cacheDir, 'install.lock');
@@ -106,20 +107,25 @@ async function withInstallLock(cacheDir, fn, { staleMs, refreshMs, stderr }) {
     }
     try {
       await fh.writeFile(String(process.pid));
-    } finally {
-      await fh.close();
+    } catch (e) {
+      // A lock without its pid would hold everyone else off until it ages out.
+      await fh.close().catch(() => {});
+      await unlink(lock).catch(() => {});
+      throw e;
     }
+    await fh.close();
     break;
   }
-  const refresh = setInterval(() => {
+  let touchedAt = Date.now();
+  const touch = () => {
+    if (Date.now() - touchedAt < refreshMs) return;
+    touchedAt = Date.now();
     const now = new Date();
     utimes(lock, now, now).catch(() => {});
-  }, refreshMs);
-  refresh.unref();
+  };
   try {
-    return await fn();
+    return await fn(touch);
   } finally {
-    clearInterval(refresh);
     await unlink(lock).catch(() => {});
   }
 }
@@ -155,11 +161,11 @@ export async function ensureChrome(
   }
   const executablePath = computeExecutablePath({ cacheDir, browser: Browser.CHROME, buildId, platform });
   if (await isExecutable(executablePath)) return { executablePath, buildId };
-  return withInstallLock(cacheDir, async () => {
+  return withInstallLock(cacheDir, async (touch) => {
     // Another process may have installed it while this one waited for the lock.
     if (await isExecutable(executablePath)) return { executablePath, buildId };
     stderr.write(`termbrowse: downloading Chrome for Testing ${buildId} (one time)...\n`);
-    const result = await installer({ cacheDir, browser: Browser.CHROME, buildId, platform });
+    const result = await installer({ cacheDir, browser: Browser.CHROME, buildId, platform, downloadProgressCallback: () => touch() });
     return { executablePath: result.executablePath, buildId };
   }, { staleMs: lockStaleMs, refreshMs: lockRefreshMs, stderr });
 }
