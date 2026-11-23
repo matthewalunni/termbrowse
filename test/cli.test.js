@@ -281,7 +281,9 @@ async function startLogin(saveDelayMs) {
   stdout.on('data', (d) => (out += d));
   stderr.on('data', (d) => (err += d));
   const signals = new EventEmitter();
-  const result = runLogin([], { stdin, stdout, stderr, env, signals, saveDelayMs, chromeOptions: { headless: true, port } });
+  // login refuses outright on Linux without a display; the test Chrome is headless, so any value does.
+  const loginEnv = process.platform === 'linux' && !env.DISPLAY && !env.WAYLAND_DISPLAY ? { ...env, DISPLAY: ':0' } : env;
+  const result = runLogin([], { stdin, stdout, stderr, env: loginEnv, signals, saveDelayMs, chromeOptions: { headless: true, port } });
   return { port, stdin, signals, result, out: () => out, err: () => err };
 }
 

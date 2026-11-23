@@ -33,7 +33,8 @@ test('runHook passes TERMBROWSE_* env to the command', async () => {
       if (saved === undefined) delete process.env.OUT;
       else process.env.OUT = saved;
     }
-    assert.equal((await readFile(out, 'utf8')).trim(), `123 9000 t2p agent ${bundleId()}`);
+    // bundleId() is '' off macOS, so the expected line has no trailing space there either.
+    assert.equal((await readFile(out, 'utf8')).trim(), `123 9000 t2p agent ${bundleId()}`.trim());
   });
 });
 
