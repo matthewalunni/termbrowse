@@ -23,6 +23,7 @@ export async function runViewer({
   stdout = process.stdout,
   stderr = process.stderr,
   signals = process,
+  env = process.env,
   onExit,
   onReady,
 }) {
@@ -32,7 +33,7 @@ export async function runViewer({
     return code;
   };
   if (!stdout.isTTY || !stdin.isTTY) return finishEarly(2, NO_KITTY);
-  if (!(await detectKitty(stdin, stdout))) return finishEarly(2, NO_KITTY);
+  if (!(await detectKitty(stdin, stdout, 800, env))) return finishEarly(2, NO_KITTY);
 
   let term = await termSize(stdin, stdout);
 
@@ -148,32 +149,58 @@ export async function runViewer({
 
   const attachPage = (session) => {
     session.addEventListener('event', (e) => { if (session === page) onPageEvent(e.detail); });
-    session.addEventListener('close', () => { if (session === page) finish(1); });
+    session.addEventListener('close', () => { if (session === page) onPageClosed(); });
   };
 
-  const switchTo = async (targetId, newUrl) => {
+  // Make `next` the viewed page: hook it up, drop the old session, start drawing.
+  const adopt = async (next, info) => {
+    const old = page;
+    page = next;
+    target = info;
+    url = info.url ?? '';
+    attachPage(next);
+    if (old !== next) old.close();
+    await page.send('Page.enable').catch(() => {});
+    if (!paused) {
+      await startScreencast();
+      setStatus(fpsSuffix(), true);
+    }
+  };
+
+  const wsFor = async (targetId) => {
     let wsUrl;
     try {
       wsUrl = (await listTargets(port)).find((t) => t.id === targetId)?.webSocketDebuggerUrl;
     } catch { /* fall back below */ }
-    wsUrl ??= `ws://127.0.0.1:${port}/devtools/page/${targetId}`;
+    return wsUrl ?? `ws://127.0.0.1:${port}/devtools/page/${targetId}`;
+  };
+
+  const switchTo = async (targetId, newUrl) => {
     let next;
     try {
-      next = await CdpSession.connect(wsUrl);
+      next = await CdpSession.connect(await wsFor(targetId));
     } catch {
       return; // keep the current page
     }
     if (closing) { next.close(); return; }
-    const old = page;
-    page = next;
-    target = { id: targetId };
-    url = newUrl ?? '';
-    attachPage(next);
-    old.close();
-    await page.send('Page.enable').catch(() => {});
-    if (!paused) {
-      await startScreencast();
-      setStatus(fpsSuffix());
+    await adopt(next, { id: targetId, url: newUrl, openerId: target.id });
+  };
+
+  // The viewed tab's socket closed. If Chrome is still up, view another tab (the opener first);
+  // otherwise report the disconnect.
+  const onPageClosed = async () => {
+    if (closing) return;
+    const closed = target;
+    try {
+      if (!(await browserVersion(port))) throw new Error('browser gone');
+      const pages = (await listTargets(port)).filter((t) => t.type === 'page' && t.id !== closed.id);
+      const next = pages.find((t) => t.id === closed.openerId) ?? pickTarget(pages, match);
+      if (!next) throw new Error('no page left');
+      const session = await CdpSession.connect(next.webSocketDebuggerUrl);
+      if (closing) { session.close(); return; }
+      await adopt(session, { id: next.id, url: next.url });
+    } catch {
+      finish(1);
     }
   };
 
@@ -208,6 +235,7 @@ export async function runViewer({
     ['SIGWINCH', () => { resize(); }],
     ['SIGINT', () => finish(0)],
     ['SIGTERM', () => finish(0)],
+    ['SIGHUP', () => finish(0)],
   ];
 
   attachPage(page);

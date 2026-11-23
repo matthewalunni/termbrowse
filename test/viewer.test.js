@@ -19,7 +19,7 @@ function fakePng(width = 1037, height = 1443) {
   return buf.toString('base64');
 }
 
-// Fake terminal: stdout is a TTY PassThrough; stdin answers CSI 14t and the Kitty query.
+// Fake terminal: stdout is a TTY PassThrough; stdin answers CSI 16t/14t/DA1 and the Kitty query.
 function fakeTerm({ kitty = true } = {}) {
   const size = { cols: 61, rows: 40, pxW: 1037, pxH: 1480 };
   const stdout = new PassThrough();
@@ -35,13 +35,14 @@ function fakeTerm({ kitty = true } = {}) {
   const write = stdout.write.bind(stdout);
   stdout.write = (chunk, ...rest) => {
     const s = String(chunk);
-    if (s.includes(`${ESC}[14t`)) {
-      // split the reply across two chunks
-      const reply = `${ESC}[4;${size.pxH};${size.pxW}t`;
-      setImmediate(() => { stdin.write(reply.slice(0, 5)); setImmediate(() => stdin.write(reply.slice(5))); });
-    }
     if (s.includes(kittyQuery())) {
       setImmediate(() => stdin.write(kitty ? `${ESC}_Gi=31;OK${ESC}\\${ESC}[?62;c` : `${ESC}[?62;c`));
+    } else if (s.includes(`${ESC}[16t`)) {
+      // cell size, window size, then DA1 as the end marker; split across chunks
+      const cellH = Math.round(size.pxH / size.rows);
+      const cellW = Math.round(size.pxW / size.cols);
+      const reply = `${ESC}[6;${cellH};${cellW}t${ESC}[4;${size.pxH};${size.pxW}t${ESC}[?62;c`;
+      setImmediate(() => { stdin.write(reply.slice(0, 5)); setImmediate(() => stdin.write(reply.slice(5))); });
     }
     return write(chunk, ...rest);
   };
@@ -74,6 +75,7 @@ function start(t, opts = {}) {
     stdout: t.stdout,
     stderr: t.stderr,
     signals: t.signals,
+    env: {},
     onReady: (c) => { controls = c; },
     ...opts,
   });
@@ -83,7 +85,7 @@ function start(t, opts = {}) {
 test('refuses non-kitty terminal', async () => {
   fake = await startFakeCdp();
   const t = fakeTerm({ kitty: false });
-  const code = await runViewer({ port: fake.port, stdin: t.stdin, stdout: t.stdout, stderr: t.stderr, signals: t.signals });
+  const code = await runViewer({ port: fake.port, stdin: t.stdin, stdout: t.stdout, stderr: t.stderr, signals: t.signals, env: {} });
   assert.equal(code, 2);
   assert.equal(t.out(), kittyQuery());
   assert.match(t.err(), /termbrowse: this terminal doesn't support Kitty graphics \(try Kitty, Ghostty, WezTerm or Herdr\)/);
@@ -95,10 +97,20 @@ test('refuses when stdout is not a TTY, writing nothing to it', async () => {
   fake = await startFakeCdp();
   const t = fakeTerm();
   t.stdout.isTTY = false;
-  const code = await runViewer({ port: fake.port, stdin: t.stdin, stdout: t.stdout, stderr: t.stderr, signals: t.signals });
+  const code = await runViewer({ port: fake.port, stdin: t.stdin, stdout: t.stdout, stderr: t.stderr, signals: t.signals, env: {} });
   assert.equal(code, 2);
   assert.equal(t.out(), '');
   assert.match(t.err(), /doesn't support Kitty graphics/);
+});
+
+test('a known Kitty terminal skips the query', async () => {
+  fake = await startFakeCdp();
+  const t = fakeTerm({ kitty: false }); // would answer DA1 only
+  const { p } = start(t, { env: { HC_TERMINAL_ID: 't9' } });
+  await until(() => methods(fake, 'Page.startScreencast').length === 1);
+  assert.ok(!t.out().includes(kittyQuery()));
+  t.stdin.write('q');
+  assert.equal(await p, 0);
 });
 
 test('draws frames', async () => {
@@ -134,7 +146,9 @@ test('disconnect restores terminal', async () => {
   const t = fakeTerm();
   const { p } = start(t);
   await until(() => methods(fake, 'Page.startScreencast').length === 1);
-  fake.closeSockets();
+  const dead = fake;
+  fake = null;
+  await dead.close(); // Chrome gone: sockets drop and /json/version stops answering
   assert.equal(await p, 1);
   assert.ok(t.out().endsWith(leaveScreen()));
   assert.match(t.out(), /disconnected/);
@@ -153,7 +167,7 @@ test('ctrl-c restores terminal', async () => {
   assert.ok(t.out().endsWith(leaveScreen()));
   assert.equal(t.stdin.isRaw, false);
   assert.equal(t.stdin.listenerCount('data'), 0);
-  for (const s of ['SIGINT', 'SIGTERM', 'SIGWINCH']) assert.equal(t.signals.listenerCount(s), 0);
+  for (const s of ['SIGINT', 'SIGTERM', 'SIGHUP', 'SIGWINCH']) assert.equal(t.signals.listenerCount(s), 0);
 });
 
 test('SIGTERM restores terminal and resolves 0', async () => {
@@ -166,6 +180,53 @@ test('SIGTERM restores terminal and resolves 0', async () => {
   assert.equal(await p, 0);
   assert.equal(exitCode, 0);
   assert.ok(t.out().endsWith(leaveScreen()));
+});
+
+test('SIGHUP restores terminal and resolves 0', async () => {
+  fake = await startFakeCdp();
+  const t = fakeTerm();
+  const { p } = start(t);
+  await until(() => methods(fake, 'Page.startScreencast').length === 1);
+  t.signals.emit('SIGHUP');
+  assert.equal(await p, 0);
+  assert.ok(t.out().endsWith(leaveScreen()));
+  assert.equal(t.signals.listenerCount('SIGHUP'), 0);
+});
+
+test('re-attaches to another tab when the viewed tab closes but Chrome stays up', async () => {
+  fake = await startFakeCdpWith([
+    { id: 'T1', type: 'page', url: 'https://example.com/', title: 'Example' },
+    { id: 'T2', type: 'page', url: 'https://other.example/', title: 'Other' },
+  ]);
+  const t = fakeTerm();
+  const { p } = start(t);
+  await until(() => methods(fake, 'Page.startScreencast').length === 1);
+  fake.closeSockets(); // the tab's socket drops; /json/version still answers
+  await until(() => methods(fake, 'Page.startScreencast').length === 2);
+  await until(() => t.out().includes('https://other.example/'));
+  assert.doesNotMatch(t.out(), /disconnected/);
+  t.stdin.write('q');
+  assert.equal(await p, 0);
+});
+
+test('when a followed popup closes, goes back to its opener', async () => {
+  const targets = [
+    { id: 'T1', type: 'page', url: 'https://example.com/', title: 'Example' },
+    { id: 'T2', type: 'page', url: 'https://other.example/', title: 'Other' },
+    { id: 'T3', type: 'page', url: 'https://popup.example/', title: 'Popup' },
+  ];
+  fake = await startFakeCdpWith(targets);
+  const t = fakeTerm();
+  const { p } = start(t);
+  await until(() => methods(fake, 'Target.setDiscoverTargets').length === 1 && methods(fake, 'Page.startScreencast').length === 1);
+  fake.send({ method: 'Target.targetCreated', params: { targetInfo: { targetId: 'T3', type: 'page', openerId: 'T1', url: 'https://popup.example/' } } });
+  await until(() => methods(fake, 'Page.startScreencast').length === 2);
+  targets.push(targets.shift()); // opener no longer first, so only the opener rule picks it
+  fake.closeSockets();
+  await until(() => methods(fake, 'Page.startScreencast').length === 3);
+  await until(() => t.out().lastIndexOf('https://example.com/') > t.out().lastIndexOf('https://popup.example/'));
+  t.stdin.write('q');
+  assert.equal(await p, 0);
 });
 
 test('pauses on bogus size, resumes on a sane one', async () => {
