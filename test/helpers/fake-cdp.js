@@ -10,6 +10,7 @@ export async function startFakeCdp({ handlers = {}, targets } = {}) {
   const server = http.createServer();
   const wss = new WebSocketServer({ server, path: '/devtools/page/fake' });
   let port;
+  let conns = 0;
   const wsUrl = () => `ws://127.0.0.1:${port}/devtools/page/fake`;
 
   server.on('request', (req, res) => {
@@ -28,10 +29,11 @@ export async function startFakeCdp({ handlers = {}, targets } = {}) {
 
   wss.on('connection', (ws) => {
     sockets.add(ws);
+    const conn = ++conns; // which connection a message came on (received[i].conn)
     ws.on('close', () => sockets.delete(ws));
     ws.on('message', async (data) => {
       const msg = JSON.parse(data.toString());
-      received.push(msg);
+      received.push({ ...msg, conn });
       const handler = handlers[msg.method];
       try {
         const result = handler ? await handler(msg.params, msg) : {};

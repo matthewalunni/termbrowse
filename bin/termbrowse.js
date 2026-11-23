@@ -7,8 +7,8 @@ if (Number(process.versions.node.split('.')[0]) < 22) {
   process.exit(1);
 }
 
-const USAGE = `Usage: termbrowse <url>
-       termbrowse view (--port N | --agent ID) [--tab MATCH]
+const USAGE = `Usage: termbrowse <url> [--fill | --no-fill]
+       termbrowse view (--port N | --agent ID) [--tab MATCH] [--fill | --no-fill]
        termbrowse mcp [-- extra chrome-devtools-mcp args]
        termbrowse agents [--json]
        termbrowse stop (--agent ID | --all)
@@ -18,6 +18,8 @@ const USAGE = `Usage: termbrowse <url>
 
 termbrowse <url> opens the page in a fresh browser drawn in this terminal; the profile is a
 copy of the login profile and is thrown away on exit. Sign in with \`termbrowse login\`.
+--fill lays the page out at the pane's size, --no-fill keeps the browser's own; the default
+comes from [view] fill_pane / fill_pane_for_agents in the config.
 `;
 
 const COMMANDS = {
@@ -47,21 +49,22 @@ async function main(argv) {
     process.stderr.write(USAGE);
     return 2;
   }
-  if (first.startsWith('-')) {
-    process.stderr.write(`termbrowse: unknown option ${first}\n${USAGE}`);
-    return 2;
-  }
-  // A bare word that can't be a URL is a mistyped command (`termbrowse agnets`), not a site.
-  if (!Object.hasOwn(COMMANDS, first) && !/[.:/]/.test(first) && first.toLowerCase() !== 'localhost') {
-    process.stderr.write(`termbrowse: unknown command ${first}\n${USAGE}`);
-    return 2;
-  }
-  const { UsageError } = await import('../src/commands/usage.js');
+  const { UsageError, parse } = await import('../src/commands/usage.js');
   try {
     if (Object.hasOwn(COMMANDS, first)) return await COMMANDS[first](rest);
-    if (rest.length) throw new UsageError(`unexpected argument ${rest[0]} after the URL`);
+    const { FILL_OPTIONS, fillFlag } = await import('../src/commands/fill.js');
+    const { values, positionals } = parse(argv, FILL_OPTIONS);
+    const [url, extra] = positionals;
+    if (url === undefined) throw new UsageError('missing URL');
+    // A bare word that can't be a URL is a mistyped command (`termbrowse agnets`), not a site.
+    if (!/[.:/]/.test(url) && url.toLowerCase() !== 'localhost') {
+      process.stderr.write(`termbrowse: unknown command ${url}\n${USAGE}`);
+      return 2;
+    }
+    if (extra !== undefined) throw new UsageError(`unexpected argument ${extra} after the URL`);
+    const fill = fillFlag(values);
     const { runBrowse } = await import('../src/commands/browse.js');
-    return await runBrowse(first);
+    return await runBrowse(url, { fill });
   } catch (err) {
     if (err instanceof UsageError) {
       process.stderr.write(`termbrowse: ${err.message}\n${USAGE}`);

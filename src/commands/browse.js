@@ -11,6 +11,7 @@ import { upsertEntry, removeEntry } from '../registry.js';
 import { listTargets } from '../cdp.js';
 import { runViewer, NO_KITTY } from '../viewer.js';
 import { detectKitty } from '../tty.js';
+import { resolveFill } from './fill.js';
 
 const SIGNALS = ['SIGINT', 'SIGTERM', 'SIGHUP'];
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -31,6 +32,7 @@ export async function runBrowse(
     env = process.env,
     signals = process,
     pid = process.pid, // names this run's registry entry and profile
+    fill: fillOverride, // --fill (true) / --no-fill (false); undefined: from the config
   } = {},
 ) {
   // The viewer would refuse a terminal it can't draw in anyway; refuse before downloading or
@@ -98,6 +100,7 @@ export async function runBrowse(
       stderr,
       env,
       signals,
+      fill: resolveFill({ kind: 'standalone', ...cfg.view, flag: fillOverride }),
       // Signals after this point reach the viewer directly; replay one it could not see.
       onReady: () => { if (interrupted) signals.emit(interrupted, interrupted); },
     });

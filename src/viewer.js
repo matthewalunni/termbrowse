@@ -26,6 +26,7 @@ export async function runViewer({
   env = process.env,
   onExit,
   onReady,
+  fill = false, // lay the page out at the pane's size (Emulation.setDeviceMetricsOverride)
 }) {
   // EIO/EPIPE once the terminal is gone (SIGHUP) must not crash the process mid-cleanup.
   const onStdoutError = () => {};
@@ -60,6 +61,8 @@ export async function runViewer({
   let closing = false;
   let status = '';
   let browser = null;
+  let lastFrameAt = 0; // when the last frame arrived (Chrome sends none while the page is still)
+  let filled = null; // the page session the size override was set on
   const received = []; // {t, size} for frames received in the last second
   const drawn = []; // timestamps of frames drawn in the last second
   let resolveRun;
@@ -82,14 +85,32 @@ export async function runViewer({
     stdout.write(statusSeq(text));
   };
   const fpsSuffix = () => {
-    prune(Date.now());
-    return `${drawn.length} fps`;
+    const now = Date.now();
+    prune(now);
+    return now - lastFrameAt > 1000 ? 'idle' : `${drawn.length} fps`;
   };
 
   const startScreencast = () => page.send('Page.startScreencast', {
     format: 'png', ...screencastSize(term), everyNthFrame: everyNth,
   }).catch(() => {});
   const stopScreencast = () => page.send('Page.stopScreencast').catch(() => {});
+  // The page lays out at the image area the screencast is sized to, so frames fill the pane.
+  const applyFill = async () => {
+    if (!fill || !saneSize(term)) return;
+    const { maxWidth: width, maxHeight: height } = screencastSize(term);
+    filled = page;
+    await page.send('Emulation.setDeviceMetricsOverride', { width, height, deviceScaleFactor: 1, mobile: false }).catch(() => {});
+  };
+  // Best effort, never throws, at most 500 ms.
+  const clearFill = async () => {
+    const session = filled;
+    filled = null;
+    if (!session) return;
+    await Promise.race([
+      session.send('Emulation.clearDeviceMetricsOverride').catch(() => {}),
+      new Promise((r) => setTimeout(r, 500)),
+    ]);
+  };
   const restartScreencast = async () => {
     await stopScreencast();
     await startScreencast();
@@ -99,6 +120,7 @@ export async function runViewer({
     page.send('Page.screencastFrameAck', { sessionId }).catch(() => {});
     if (closing) return;
     const now = Date.now();
+    lastFrameAt = now;
     received.push({ t: now, size: data.length });
     prune(now);
     const n = nextEveryNth(everyNth, received.map((f) => f.size));
@@ -137,10 +159,10 @@ export async function runViewer({
     stdin.removeListener('data', onKey);
     for (const [sig, fn] of sigHandlers) signals.removeListener(sig, fn);
     if (code === 0) {
-      await Promise.race([stopScreencast(), new Promise((r) => setTimeout(r, 500))]);
+      await Promise.race([Promise.all([stopScreencast(), clearFill()]), new Promise((r) => setTimeout(r, 500))]);
     } else {
       setStatus('disconnected', true);
-      await new Promise((r) => setTimeout(r, 1000));
+      await Promise.all([clearFill(), new Promise((r) => setTimeout(r, 1000))]);
     }
     stdout.write(leaveScreen());
     if (typeof stdin.setRawMode === 'function' && !!stdin.isRaw !== wasRaw) stdin.setRawMode(wasRaw);
@@ -160,6 +182,8 @@ export async function runViewer({
   // Make `next` the viewed page: hook it up, drop the old session, start drawing.
   const adopt = async (next, info) => {
     const old = page;
+    if (old !== next) await clearFill();
+    if (closing) { if (old !== next) next.close(); return; }
     page = next;
     target = info;
     url = info.url ?? '';
@@ -167,6 +191,7 @@ export async function runViewer({
     if (old !== next) old.close();
     await page.send('Page.enable').catch(() => {});
     if (!paused) {
+      await applyFill();
       await startScreencast();
       setStatus(fpsSuffix(), true);
     }
@@ -224,6 +249,7 @@ export async function runViewer({
         setStatus('paused', true);
       } else {
         paused = false;
+        await applyFill();
         await restartScreencast();
         setStatus(fpsSuffix(), true);
       }
@@ -255,6 +281,7 @@ export async function runViewer({
 
   await page.send('Page.enable').catch(() => {});
   if (saneSize(term)) {
+    await applyFill();
     await startScreencast();
     setStatus(fpsSuffix(), true);
   } else {

@@ -29,7 +29,7 @@ termbrowse example.com
 termbrowse localhost:3000        # localhost and 127.0.0.1 get http://
 ```
 
-This starts a Chrome for Testing of its own and draws the page in the terminal. In a terminal that can't draw Kitty graphics it says so and exits 2 before starting any Chrome. Press `q` or Ctrl-C to quit, which closes that Chrome. The last row is a status line with the URL and frames per second, or `paused` (the pane is too small) or `disconnected` (Chrome went away). When a new tab opens (a popup, or a page an agent opens with `new_page`), the viewer switches to it, and when that tab closes it goes back to the tab it was showing before.
+This starts a Chrome for Testing of its own and draws the page in the terminal. In a terminal that can't draw Kitty graphics it says so and exits 2 before starting any Chrome. Press `q` or Ctrl-C to quit, which closes that Chrome. The last row is a status line with the URL and frames per second, `idle` when no frame came in the last second (Chrome only sends frames when the page changes), or `paused` (the pane is too small) or `disconnected` (Chrome went away). When a new tab opens (a popup, or a page an agent opens with `new_page`), the viewer switches to it, and when that tab closes it goes back to the tab it was showing before.
 
 Each run uses a fresh copy of the starter profile (see `termbrowse login`), and that copy is deleted when you quit. Signing in during a `termbrowse <url>` session lasts only for that session. You can run several at once.
 
@@ -125,6 +125,10 @@ prune_days = 7              # delete agent profiles unused for this many days
 
 [hooks]
 on_launch = ""              # shell command run after a termbrowse Chrome starts
+
+[view]
+fill_pane = true             # pages opened with `termbrowse <url>` (and `view --port` on such a browser) fill the pane
+fill_pane_for_agents = false # agent browsers fill the pane too (`view --agent`, `view --port` on an agent's port)
 ```
 
 `on_launch` runs with `sh -c` once the new Chrome has a page. Its environment has these variables:
@@ -147,6 +151,17 @@ Other environment variables:
 | `TERMBROWSE_CONFIG` | path of the config file |
 | `XDG_STATE_HOME` | state: registry, profiles, logs (default `~/.local/state/termbrowse`) |
 | `XDG_CACHE_HOME` | Chrome for Testing downloads (default `~/.cache/termbrowse`) |
+
+## Filling the pane
+
+By default the viewer draws the page at the browser's own window size, scaled down to fit the pane, so it may leave empty space at the sides or bottom. When filling, the viewer tells Chrome to lay the page out at the pane's size instead (pane width × the height above the status row). It does this again when the pane is resized or the viewer switches tabs, and undoes it when you quit or switch away.
+
+- `fill_pane = true` (the default) fills the pane for browsers started by `termbrowse <url>`.
+- `fill_pane_for_agents = true` fills the pane for agent browsers too.
+- `view --port` on a Chrome termbrowse did not start (your own Chrome) never fills unless you pass `--fill`.
+- `--fill` / `--no-fill` on `termbrowse <url>` and `termbrowse view` override the config for that run.
+
+Warning: with `fill_pane_for_agents = true`, an agent's page takes your pane's size while you watch it. Its layout, and the screenshots the agent takes, then depend on the size of your pane.
 
 ## Terminal support
 

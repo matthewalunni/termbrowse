@@ -336,3 +336,73 @@ test('nextEveryNth throttles heavy fast streams and recovers', () => {
   assert.equal(nextEveryNth(2, light.slice(0, 25)), 1);
   assert.equal(nextEveryNth(2, []), 2, 'no frames: no change');
 });
+
+const SET = 'Emulation.setDeviceMetricsOverride';
+const CLEAR = 'Emulation.clearDeviceMetricsOverride';
+
+test('fill: the page is laid out at the pane image area, again on resize, cleared on exit', async () => {
+  fake = await startFakeCdp();
+  const t = fakeTerm();
+  const { p, controls } = start(t, { fill: true });
+  await until(() => methods(fake, 'Page.startScreencast').length === 1 && methods(fake, SET).length === 1);
+  assert.deepEqual(methods(fake, SET)[0].params, { width: 1037, height: 1443, deviceScaleFactor: 1, mobile: false });
+  Object.assign(t.size, { cols: 80, rows: 25, pxW: 800, pxH: 500 });
+  await controls().resize();
+  await until(() => methods(fake, SET).length === 2);
+  assert.deepEqual(methods(fake, SET)[1].params, { width: 800, height: 480, deviceScaleFactor: 1, mobile: false });
+  assert.equal(methods(fake, CLEAR).length, 0);
+  t.stdin.write('q');
+  assert.equal(await p, 0);
+  assert.equal(methods(fake, CLEAR).length, 1);
+});
+
+test('fill: switching tabs clears the old page and fits the new one', async () => {
+  const targets = [{ id: 'T1', type: 'page', url: 'https://example.com/', title: 'Example' }];
+  fake = await startFakeCdpWith(targets);
+  const t = fakeTerm();
+  const { p } = start(t, { fill: true });
+  await until(() => methods(fake, 'Target.setDiscoverTargets').length === 1 && methods(fake, SET).length === 1);
+  const oldConn = methods(fake, SET)[0].conn;
+  targets.push({ id: 'T2', type: 'page', url: 'https://popup.example/', title: 'Popup', webSocketDebuggerUrl: fake.wsUrl });
+  fake.send({ method: 'Target.targetCreated', params: { targetInfo: { targetId: 'T2', type: 'page', openerId: 'T1', url: 'https://popup.example/' } } });
+  await until(() => methods(fake, SET).length === 2 && methods(fake, CLEAR).length === 1);
+  assert.equal(methods(fake, CLEAR)[0].conn, oldConn, 'cleared on the page that was fitted');
+  assert.notEqual(methods(fake, SET)[1].conn, oldConn, 'fitted on the new page');
+  assert.deepEqual(methods(fake, SET)[1].params, { width: 1037, height: 1443, deviceScaleFactor: 1, mobile: false });
+  t.stdin.write('q');
+  assert.equal(await p, 0);
+  assert.equal(methods(fake, CLEAR).length, 2);
+  assert.equal(methods(fake, CLEAR)[1].conn, methods(fake, SET)[1].conn);
+});
+
+test('fill off: the page size is never touched', async () => {
+  fake = await startFakeCdp();
+  const t = fakeTerm();
+  const { p, controls } = start(t, { fill: false });
+  await until(() => methods(fake, 'Page.startScreencast').length === 1);
+  Object.assign(t.size, { cols: 80, rows: 25, pxW: 800, pxH: 500 });
+  await controls().resize();
+  t.stdin.write('q');
+  assert.equal(await p, 0);
+  assert.equal(methods(fake, SET).length, 0);
+  assert.equal(methods(fake, CLEAR).length, 0);
+});
+
+test('status says idle, not 0 fps, once frames stop', async () => {
+  fake = await startFakeCdp({
+    handlers: {
+      'Page.startScreencast': () => {
+        setTimeout(() => fake.send({ method: 'Page.screencastFrame', params: { data: fakePng(), sessionId: 1, metadata: {} } }), 20);
+        return {};
+      },
+    },
+  });
+  const t = fakeTerm();
+  const { p } = start(t);
+  await until(() => count(t.out(), 'a=T,f=100') === 1);
+  assert.match(t.out(), /https:\/\/example\.com\/  1 fps/);
+  await until(() => /https:\/\/example\.com\/  idle/.test(t.out().slice(t.out().lastIndexOf('a=T,f=100'))), 3000);
+  assert.doesNotMatch(t.out(), / 0 fps/);
+  t.stdin.write('q');
+  assert.equal(await p, 0);
+});

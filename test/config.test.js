@@ -48,3 +48,24 @@ test('headless forced without display on linux', () => {
   assert.equal(effectiveHeadless(cfg, { DISPLAY: ':0' }, 'linux'), false);
   assert.equal(effectiveHeadless(cfg, {}, 'darwin'), false);
 });
+
+test('view fill defaults: fill_pane on, fill_pane_for_agents off', async () => {
+  const cfg = await loadConfig({ TERMBROWSE_CONFIG: '/nonexistent.toml' });
+  assert.equal(cfg.view.fillPane, true);
+  assert.equal(cfg.view.fillPaneForAgents, false);
+});
+
+test('reads [view] fill_pane and fill_pane_for_agents', async () => {
+  const file = await tmpFile('[view]\nfill_pane = false\nfill_pane_for_agents = true\n');
+  const cfg = await loadConfig({ TERMBROWSE_CONFIG: file });
+  assert.equal(cfg.view.fillPane, false);
+  assert.equal(cfg.view.fillPaneForAgents, true);
+});
+
+test('non-boolean fill values name the file and the key', async () => {
+  for (const line of ['fill_pane = "always"', 'fill_pane_for_agents = 1']) {
+    const file = await tmpFile(`[view]\n${line}\n`);
+    const key = line.split(' ')[0];
+    await assert.rejects(loadConfig({ TERMBROWSE_CONFIG: file }), (err) => err.message.includes(file) && err.message.includes(key));
+  }
+});

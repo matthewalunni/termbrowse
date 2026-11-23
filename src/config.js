@@ -8,6 +8,11 @@ function parseSize(value, file) {
   return [Number(m[1]), Number(m[2])];
 }
 
+function parseBool(value, key, file) {
+  if (typeof value !== 'boolean') throw new Error(`${file}: invalid ${key} ${JSON.stringify(value)} (expected true or false)`);
+  return value;
+}
+
 export async function loadConfig(env = process.env) {
   const file = env.TERMBROWSE_CONFIG || paths(env).config;
   let raw = {};
@@ -24,7 +29,7 @@ export async function loadConfig(env = process.env) {
       throw new Error(`${file}: invalid TOML: ${err.message}`);
     }
   }
-  const { chrome = {}, agents = {}, hooks = {} } = raw;
+  const { chrome = {}, agents = {}, hooks = {}, view = {} } = raw;
   return {
     chrome: {
       channel: chrome.channel ?? 'stable',
@@ -34,6 +39,10 @@ export async function loadConfig(env = process.env) {
     },
     agents: { pruneDays: agents.prune_days ?? 7 },
     hooks: { onLaunch: hooks.on_launch ?? '' },
+    view: {
+      fillPane: parseBool(view.fill_pane ?? true, 'fill_pane', file),
+      fillPaneForAgents: parseBool(view.fill_pane_for_agents ?? false, 'fill_pane_for_agents', file),
+    },
   };
 }
 

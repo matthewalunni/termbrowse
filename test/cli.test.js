@@ -8,12 +8,13 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { normalizeUrl, runBrowse } from '../src/commands/browse.js';
+import { kindOfPort } from '../src/commands/view.js';
 import { runLogin } from '../src/commands/login.js';
 import { browserVersion, listTargets } from '../src/cdp.js';
 import { freePort } from '../src/chrome.js';
 import { kittyQuery } from '../src/kitty.js';
 import { paths } from '../src/paths.js';
-import { upsertEntry, readRegistry } from '../src/registry.js';
+import { upsertEntry, removeEntry, readRegistry } from '../src/registry.js';
 import { startFakeCdp } from './helpers/fake-cdp.js';
 
 const BIN = fileURLToPath(new URL('../bin/termbrowse.js', import.meta.url));
@@ -423,4 +424,35 @@ test('no arguments prints usage and exits 2', async () => {
   const r = await run([]);
   assert.equal(r.code, 2);
   assert.match(r.stderr, /Usage/);
+});
+
+test('--fill and --no-fill together are a usage error, for browse and view', async () => {
+  for (const args of [['example.com', '--fill', '--no-fill'], ['--no-fill', '--fill', 'example.com'], ['view', '--port', '9222', '--fill', '--no-fill']]) {
+    const r = await run(args);
+    assert.equal(r.code, 2, args.join(' '));
+    assert.match(r.stderr, /--fill/);
+    assert.match(r.stderr, /Usage/);
+  }
+});
+
+test('browse accepts --fill / --no-fill around the URL', async () => {
+  for (const args of [['example.com', '--no-fill'], ['--fill', 'example.com']]) {
+    const r = await run(args);
+    assert.equal(r.code, 2, args.join(' '));
+    assert.match(r.stderr, /doesn't support Kitty graphics/, 'got as far as the terminal check');
+  }
+});
+
+test('view --port: the registry says whose browser a port is', async () => {
+  const [a, b] = [fakeChrome().pid, fakeChrome().pid];
+  await upsertEntry({ agentId: 'kind-agent', pid: a, port: 40001, profileDir: '/x', kind: 'agent' }, p);
+  await upsertEntry({ agentId: 'standalone-k', pid: b, port: 40002, profileDir: '/y', kind: 'standalone' }, p);
+  try {
+    assert.equal(await kindOfPort(40001, p), 'agent');
+    assert.equal(await kindOfPort(40002, p), 'standalone');
+    assert.equal(await kindOfPort(40003, p), 'unknown');
+  } finally {
+    await removeEntry('kind-agent', p);
+    await removeEntry('standalone-k', p);
+  }
 });
