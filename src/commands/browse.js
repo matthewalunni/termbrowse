@@ -9,9 +9,9 @@ import { runHook } from '../hook.js';
 import { profileFromStarter, standaloneProfileDir, pruneProfiles } from '../profiles.js';
 import { upsertEntry, removeEntry } from '../registry.js';
 import { listTargets } from '../cdp.js';
-import { runViewer } from '../viewer.js';
+import { runViewer, NO_KITTY } from '../viewer.js';
+import { detectKitty } from '../tty.js';
 
-const NO_TTY = "termbrowse: this terminal doesn't support Kitty graphics (try Kitty, Ghostty, WezTerm or Herdr)\n";
 const SIGNALS = ['SIGINT', 'SIGTERM', 'SIGHUP'];
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -33,9 +33,10 @@ export async function runBrowse(
     pid = process.pid, // names this run's registry entry and profile
   } = {},
 ) {
-  // The viewer would refuse a non-terminal anyway; refuse before starting a Chrome for nothing.
-  if (!stdout.isTTY || !stdin.isTTY) {
-    stderr.write(NO_TTY);
+  // The viewer would refuse a terminal it can't draw in anyway; refuse before downloading or
+  // starting a Chrome for nothing.
+  if (!stdout.isTTY || !stdin.isTTY || !(await detectKitty(stdin, stdout, 800, env))) {
+    stderr.write(NO_KITTY);
     return 2;
   }
   const url = normalizeUrl(input);
@@ -55,6 +56,9 @@ export async function runBrowse(
   };
   const handlers = SIGNALS.map((sig) => [sig, () => onSignal(sig)]);
   for (const [sig, fn] of handlers) signals.on(sig, fn);
+  // EIO/EPIPE once the terminal is gone (SIGHUP) must not crash before Chrome and the profile are cleaned up.
+  const onStdoutError = () => {};
+  stdout.on('error', onStdoutError);
 
   const agentId = `standalone-${pid}`;
   const profileDir = standaloneProfileDir(pid, p);
@@ -103,6 +107,7 @@ export async function runBrowse(
       await removeEntry(agentId, p).catch(() => {});
     }
     await rm(profileDir, { recursive: true, force: true }).catch(() => {});
+    stdout.off('error', onStdoutError);
   }
 }
 

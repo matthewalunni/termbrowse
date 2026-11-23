@@ -5,7 +5,7 @@ import { listTargets, browserVersion, pickTarget, CdpSession } from './cdp.js';
 import { termSize, detectKitty } from './tty.js';
 
 const ESC = '\x1b';
-const NO_KITTY = "termbrowse: this terminal doesn't support Kitty graphics (try Kitty, Ghostty, WezTerm or Herdr)\n";
+export const NO_KITTY = "termbrowse: this terminal doesn't support Kitty graphics (try Kitty, Ghostty, WezTerm or Herdr)\n";
 
 // Throttle decision from the base64 sizes of the frames received in the last second.
 export function nextEveryNth(current, sizes) {
@@ -27,7 +27,11 @@ export async function runViewer({
   onExit,
   onReady,
 }) {
+  // EIO/EPIPE once the terminal is gone (SIGHUP) must not crash the process mid-cleanup.
+  const onStdoutError = () => {};
+  stdout.on('error', onStdoutError);
   const finishEarly = (code, msg) => {
+    stdout.off('error', onStdoutError);
     if (msg) stderr.write(msg);
     onExit?.(code);
     return code;
@@ -143,6 +147,7 @@ export async function runViewer({
     if (!wasFlowing) stdin.pause();
     page.close();
     browser?.close();
+    stdout.off('error', onStdoutError);
     onExit?.(code);
     resolveRun(code);
   };
@@ -183,10 +188,11 @@ export async function runViewer({
       return; // keep the current page
     }
     if (closing) { next.close(); return; }
+    // openerId: the tab to go back to when this one closes (the one viewed until now).
     await adopt(next, { id: targetId, url: newUrl, openerId: target.id });
   };
 
-  // The viewed tab's socket closed. If Chrome is still up, view another tab (the opener first);
+  // The viewed tab's socket closed. If Chrome is still up, view another tab (the one it was followed from first);
   // otherwise report the disconnect.
   const onPageClosed = async () => {
     if (closing) return;
@@ -256,7 +262,9 @@ export async function runViewer({
     setStatus('paused', true);
   }
 
-  // Follow popups: a second session on the browser endpoint reports new targets.
+  // Follow every new tab (popups, and new_page from chrome-devtools-mcp, which has no opener):
+  // a second session on the browser endpoint reports new targets. Turning discovery on first
+  // reports the tabs that already exist; those are skipped.
   (async () => {
     const wsUrl = (await browserVersion(port))?.webSocketDebuggerUrl;
     if (!wsUrl || closing) return;
@@ -266,14 +274,17 @@ export async function runViewer({
       return;
     }
     if (closing) { browser.close(); return; }
+    let discovering = true;
     browser.addEventListener('event', (e) => {
       const { method, params } = e.detail;
       const info = params?.targetInfo;
-      if (method === 'Target.targetCreated' && info?.type === 'page' && info.openerId === target.id) {
+      if (discovering || closing) return;
+      if (method === 'Target.targetCreated' && info?.type === 'page' && info.targetId !== target.id) {
         switchTo(info.targetId, info.url);
       }
     });
     await browser.send('Target.setDiscoverTargets', { discover: true }).catch(() => {});
+    discovering = false;
   })();
 
   onReady?.({ resize });

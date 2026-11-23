@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { EventEmitter } from 'node:events';
 import { PassThrough } from 'node:stream';
-import { mkdtemp, mkdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -44,7 +44,7 @@ async function until(fn, ms = 5000) {
 }
 
 // Fake Kitty terminal (as in viewer.test.js): answers the Kitty query and the size queries.
-function fakeTerm({ replyDelayMs = 0 } = {}) {
+function fakeTerm({ replyDelayMs = 0, kitty = true } = {}) {
   const ESC = '\x1b';
   const stdout = new PassThrough();
   stdout.isTTY = true;
@@ -59,12 +59,14 @@ function fakeTerm({ replyDelayMs = 0 } = {}) {
   const write = stdout.write.bind(stdout);
   stdout.write = (chunk, ...rest) => {
     const s = String(chunk);
-    if (s.includes(kittyQuery())) setTimeout(() => stdin.write(`${ESC}_Gi=31;OK${ESC}\\${ESC}[?62;c`), replyDelayMs);
+    if (s.includes(kittyQuery())) setTimeout(() => stdin.write(kitty ? `${ESC}_Gi=31;OK${ESC}\\${ESC}[?62;c` : `${ESC}[?62;c`), replyDelayMs);
     else if (s.includes(`${ESC}[16t`)) setImmediate(() => stdin.write(`${ESC}[6;20;10t${ESC}[4;480;800t${ESC}[?62;c`));
     return write(chunk, ...rest);
   };
   const stderr = new PassThrough();
-  return { stdin, stdout, stderr, env, signals: new EventEmitter(), out: () => out };
+  let err = '';
+  stderr.on('data', (d) => { err += d; });
+  return { stdin, stdout, stderr, env, signals: new EventEmitter(), out: () => out, err: () => err };
 }
 
 const children = [];
@@ -213,6 +215,19 @@ test('unknown options and extra arguments after the URL are usage errors', async
   assert.equal((await run(['agents', '--nope'])).code, 2);
 });
 
+test('browse: a terminal without Kitty graphics exits 2 before any Chrome or profile', async () => {
+  const pid = fakeChrome().pid;
+  const t = fakeTerm({ kitty: false });
+  const logsBefore = await readdir(p.logs).catch(() => []);
+  const code = await runBrowse('example.com', { ...t, pid });
+  assert.equal(code, 2);
+  assert.match(t.err(), /doesn't support Kitty graphics/);
+  assert.deepEqual(await readdir(p.logs).catch(() => []), logsBefore, 'no Chrome was started (it would leave a log)');
+  await assert.rejects(stat(join(p.profiles, `standalone-${pid}`)));
+  assert.deepEqual(await readRegistry(p), []);
+  assert.equal(t.signals.listenerCount('SIGTERM'), 0);
+});
+
 async function startBrowse(pid, termOptions) {
   const t = fakeTerm(termOptions);
   const result = runBrowse('data:text/html,<body style="background:red">hi</body>', { ...t, pid });
@@ -268,6 +283,25 @@ test('browse: a signal while the viewer is still starting ends the run and clean
   assert.deepEqual(await readRegistry(p), []);
   await assert.rejects(stat(entry.profileDir));
   assert.equal(t.signals.listenerCount('SIGTERM'), 0);
+});
+
+test('browse: stdout errors after the terminal hangs up do not stop the cleanup', { skip, timeout: 60_000 }, async () => {
+  const pid = fakeChrome().pid;
+  const { t, result, entry } = await startBrowse(pid);
+  assert.ok(entry, 'standalone entry registered');
+  assert.ok(await until(() => t.out().includes('\x1b_G'), 15_000), 'a Kitty frame was drawn');
+  const eio = () => Object.assign(new Error('write EIO'), { code: 'EIO' });
+  const write = t.stdout.write;
+  t.stdout.write = (chunk, ...rest) => {
+    setImmediate(() => t.stdout.emit('error', eio())); // after the viewer has finished, too
+    return write(chunk, ...rest);
+  };
+  t.signals.emit('SIGHUP');
+  assert.equal(await result, 0);
+  assert.equal(alive(entry.pid), false);
+  await assert.rejects(stat(entry.profileDir));
+  assert.deepEqual(await readRegistry(p), []);
+  assert.equal(t.stdout.listenerCount('error'), 0);
 });
 
 // Login with a headless Chrome (tests must not open windows) and a short save delay.

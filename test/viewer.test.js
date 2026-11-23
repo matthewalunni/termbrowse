@@ -257,12 +257,68 @@ test('follows a popup opened by the current page', async () => {
   const t = fakeTerm();
   const { p } = start(t);
   await until(() => methods(fake, 'Target.setDiscoverTargets').length === 1 && methods(fake, 'Page.startScreencast').length === 1);
-  fake.send({ method: 'Target.targetCreated', params: { targetInfo: { targetId: 'T9', type: 'page', openerId: 'OTHER', url: 'x' } } });
+  fake.send({ method: 'Target.targetCreated', params: { targetInfo: { targetId: 'T9', type: 'service_worker', url: 'x' } } });
   fake.send({ method: 'Target.targetCreated', params: { targetInfo: { targetId: 'T2', type: 'page', openerId: 'T1', url: 'https://popup.example/' } } });
   await until(() => methods(fake, 'Page.startScreencast').length === 2);
   await until(() => t.out().includes('https://popup.example/'));
   t.stdin.write('q');
   assert.equal(await p, 0);
+});
+
+test('follows a new page that has no opener (chrome-devtools-mcp new_page)', async () => {
+  fake = await startFakeCdpWith([
+    { id: 'T1', type: 'page', url: 'https://example.com/', title: 'Example' },
+    { id: 'T2', type: 'page', url: 'https://new.example/', title: 'New' },
+  ]);
+  const t = fakeTerm();
+  const { p } = start(t);
+  await until(() => methods(fake, 'Target.setDiscoverTargets').length === 1 && methods(fake, 'Page.startScreencast').length === 1);
+  fake.send({ method: 'Target.targetCreated', params: { targetInfo: { targetId: 'T2', type: 'page', url: 'https://new.example/' } } });
+  await until(() => methods(fake, 'Page.startScreencast').length === 2);
+  await until(() => t.out().includes('https://new.example/'));
+  t.stdin.write('q');
+  assert.equal(await p, 0);
+});
+
+test('pages that already exist when discovery starts are not followed', async () => {
+  const targets = [
+    { id: 'T1', type: 'page', url: 'https://example.com/', title: 'Example' },
+    { id: 'T2', type: 'page', url: 'https://old.example/', title: 'Old' },
+  ];
+  fake = await startFakeCdp({
+    targets,
+    handlers: {
+      // Chrome reports every existing target as created before it answers setDiscoverTargets.
+      'Target.setDiscoverTargets': () => {
+        for (const x of targets) fake.send({ method: 'Target.targetCreated', params: { targetInfo: { targetId: x.id, type: 'page', url: x.url } } });
+        return {};
+      },
+    },
+  });
+  for (const x of targets) x.webSocketDebuggerUrl = fake.wsUrl;
+  const t = fakeTerm();
+  const { p } = start(t);
+  await until(() => methods(fake, 'Target.setDiscoverTargets').length === 1 && methods(fake, 'Page.startScreencast').length === 1);
+  await new Promise((r) => setTimeout(r, 200));
+  assert.equal(methods(fake, 'Page.startScreencast').length, 1);
+  assert.ok(!t.out().includes('https://old.example/'));
+  t.stdin.write('q');
+  assert.equal(await p, 0);
+});
+
+test('a stdout error (EIO after the terminal hangs up) while finishing does not crash the viewer', async () => {
+  fake = await startFakeCdp();
+  const t = fakeTerm();
+  const write = t.stdout.write;
+  t.stdout.write = (chunk, ...rest) => {
+    if (String(chunk).includes(leaveScreen())) t.stdout.emit('error', Object.assign(new Error('write EIO'), { code: 'EIO' }));
+    return write(chunk, ...rest);
+  };
+  const { p } = start(t);
+  await until(() => methods(fake, 'Page.startScreencast').length === 1);
+  t.signals.emit('SIGHUP');
+  assert.equal(await p, 0);
+  assert.equal(t.stdout.listenerCount('error'), 0, 'the error handler is removed on finish');
 });
 
 // The fake picks its port at listen time, so build the target list from the live port.
