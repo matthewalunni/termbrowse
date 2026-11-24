@@ -33,6 +33,7 @@ export async function runBrowse(
     signals = process,
     pid = process.pid, // names this run's registry entry and profile
     fill: fillOverride, // --fill (true) / --no-fill (false); undefined: from the config
+    watch = false, // --watch: draw only, send no input (else [view] interactive decides)
     viewer = runViewer, // injectable for tests
   } = {},
 ) {
@@ -104,6 +105,7 @@ export async function runBrowse(
       signals,
       fill: resolveFill({ kind: 'standalone', ...cfg.view, flag: fillOverride }),
       keys: cfg.keys,
+      interactive: !watch && cfg.view.interactive,
       control: { agentId: null, idleReturnMs: cfg.control.idleReturnMs }, // standalone: no control file
       // Signals after this point reach the viewer directly; replay one it could not see.
       onReady: () => { if (interrupted) signals.emit(interrupted, interrupted); },

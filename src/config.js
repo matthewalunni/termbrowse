@@ -35,11 +35,14 @@ export function parseKeySpec(str) {
 }
 
 const DURATION_UNITS = { ms: 1, s: 1000, m: 60000, h: 3600000 };
+const MAX_DURATION_MS = 24 * 86_400_000; // under setTimeout's limit (2^31 - 1 ms, about 24.8 days)
 
 export function parseDuration(str) {
   const m = /^(\d+)(ms|s|m|h)$/.exec(String(str).trim());
   if (!m) throw new Error(`invalid duration "${str}" (expected e.g. "90s", "5m", "2h")`);
-  return Number(m[1]) * DURATION_UNITS[m[2]];
+  const ms = Number(m[1]) * DURATION_UNITS[m[2]];
+  if (ms <= 0 || ms > MAX_DURATION_MS) throw new Error(`invalid duration "${str}" (must be more than 0 and at most 24 days)`);
+  return ms;
 }
 
 function inFile(file, key, fn, value) {
@@ -80,6 +83,7 @@ export async function loadConfig(env = process.env) {
     view: {
       fillPane: parseBool(view.fill_pane ?? true, 'fill_pane', file),
       fillPaneForAgents: parseBool(view.fill_pane_for_agents ?? false, 'fill_pane_for_agents', file),
+      interactive: parseBool(view.interactive ?? true, 'interactive', file),
     },
     keys: {
       prefix: inFile(file, 'prefix', parseKeySpec, keys.prefix ?? 'ctrl-]'),

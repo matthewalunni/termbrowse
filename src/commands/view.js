@@ -1,4 +1,4 @@
-// `termbrowse view (--port N | --agent ID) [--tab MATCH]`: draw an existing Chrome's tab here.
+// `termbrowse view (--port N | --agent ID) [--tab MATCH] [--watch]`: draw an existing Chrome's tab here.
 import { paths } from '../paths.js';
 import { loadConfig } from '../config.js';
 import { findEntry, readRegistry } from '../registry.js';
@@ -22,6 +22,7 @@ export async function runView(args, { stderr = process.stderr, env = process.env
     port: { type: 'string' },
     agent: { type: 'string' },
     tab: { type: 'string' },
+    watch: { type: 'boolean' },
     ...FILL_OPTIONS,
   });
   if (positionals.length) throw new UsageError(`view: unexpected argument ${positionals[0]}`);
@@ -52,6 +53,7 @@ export async function runView(args, { stderr = process.stderr, env = process.env
     env,
     fill: resolveFill({ kind, ...cfg.view, flag }),
     keys: cfg.keys,
+    interactive: !values.watch && cfg.view.interactive, // watch only: no input, never takes control
     // Control (and the agent's wait) applies to agent browsers only.
     control: { agentId: kindOf(entry) === 'agent' ? entry.agentId : null, idleReturnMs: cfg.control.idleReturnMs },
   });

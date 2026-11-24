@@ -114,6 +114,27 @@ test('parseDuration', () => {
   assert.throws(() => parseDuration('5 minutes'));
 });
 
+test('parseDuration rejects 0 and anything over 24 days (the setTimeout limit)', () => {
+  for (const bad of ['0s', '0ms', '0m', '577h', '2073600001ms']) assert.throws(() => parseDuration(bad), /duration/, bad);
+  assert.equal(parseDuration('576h'), 24 * 86_400_000);
+  assert.equal(parseDuration('1ms'), 1);
+});
+
+test('a zero or too long duration in the config names the file and key', async () => {
+  const a = await tmpFile('[control]\nidle_return = "0s"\n');
+  await assert.rejects(loadConfig({ TERMBROWSE_CONFIG: a }), (err) => err.message.includes(a) && err.message.includes('idle_return'));
+  const b = await tmpFile('[control]\nmax_wait = "1000h"\n');
+  await assert.rejects(loadConfig({ TERMBROWSE_CONFIG: b }), (err) => err.message.includes(b) && err.message.includes('max_wait'));
+});
+
+test('[view] interactive: default true, false read, a non-bool names the file', async () => {
+  assert.equal((await loadConfig({ TERMBROWSE_CONFIG: '/nonexistent.toml' })).view.interactive, true);
+  const off = await tmpFile('[view]\ninteractive = false\n');
+  assert.equal((await loadConfig({ TERMBROWSE_CONFIG: off })).view.interactive, false);
+  const bad = await tmpFile('[view]\ninteractive = "no"\n');
+  await assert.rejects(loadConfig({ TERMBROWSE_CONFIG: bad }), (err) => err.message.includes(bad) && err.message.includes('interactive'));
+});
+
 test('invalid key or duration names the file', async () => {
   const a = await tmpFile('[keys]\nprefix = "ctrl-"\n');
   await assert.rejects(loadConfig({ TERMBROWSE_CONFIG: a }), (err) => err.message.includes(a) && err.message.includes('prefix'));

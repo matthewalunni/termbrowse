@@ -16,6 +16,7 @@ import { kittyQuery } from '../src/kitty.js';
 import { paths } from '../src/paths.js';
 import { upsertEntry, removeEntry, readRegistry } from '../src/registry.js';
 import { startFakeCdp } from './helpers/fake-cdp.js';
+import { runViewer } from '../src/viewer.js';
 
 const BIN = fileURLToPath(new URL('../bin/termbrowse.js', import.meta.url));
 const skip = process.env.TERMBROWSE_SKIP_CHROME === '1' ? 'TERMBROWSE_SKIP_CHROME=1' : false;
@@ -487,15 +488,52 @@ test('view --agent ID passes that agent id to the viewer; --port on an agent por
   assert.deepEqual(seen.map((o) => o.control.agentId), ['ctl-agent', 'ctl-agent', null, null], 'only agent browsers are controlled');
   assert.equal(seen[0].control.idleReturnMs, 300_000);
   assert.equal(seen[0].keys.prefix.label, 'Ctrl-]');
+  assert.ok(seen.every((o) => o.interactive === true), 'interactive by default');
 });
 
-test('browse passes null as the control agent id (standalone browsers never write a control file)', { skip, timeout: 60_000 }, async () => {
+test('browse and view accept --watch', async () => {
+  for (const args of [['example.com', '--watch'], ['--watch', 'example.com'], ['view', '--port', '9222', '--watch']]) {
+    const r = await run(args);
+    assert.equal(r.code, 2, args.join(' '));
+    assert.match(r.stderr, /doesn't support Kitty graphics/, 'got as far as the terminal check');
+  }
+  const help = await run(['--help']);
+  assert.match(help.stdout, /termbrowse <url> \[--fill \| --no-fill\] \[--watch\]/);
+  assert.match(help.stdout, /view \(--port N \| --agent ID\) .*\[--watch\]/);
+});
+
+// Watch only: the viewer draws but never sends input, so it never takes an agent's browser.
+test('view --watch, or [view] interactive = false: no mouse modes, q quits, nothing reaches the page', async () => {
+  const fake = await startFakeCdp();
+  const watchOff = join(tmp, 'watch-off.toml');
+  await writeFile(watchOff, '[view]\ninteractive = false\n');
+  try {
+    for (const [args, extraEnv] of [[['--watch'], {}], [[], { TERMBROWSE_CONFIG: watchOff }]]) {
+      const t = fakeTerm();
+      const before = fake.received.length;
+      const viewer = (o) => runViewer({ ...o, stdin: t.stdin, stdout: t.stdout, signals: t.signals });
+      const done = runView(['--port', String(fake.port), ...args], { env: { ...env, ...extraEnv }, viewer, stderr: t.stderr });
+      assert.ok(await until(() => fake.received.slice(before).some((m) => m.method === 'Page.startScreencast')), t.err());
+      t.stdin.write('\x1b[<0;10;5M\x1b[<0;10;5mab');
+      await sleep(100);
+      t.stdin.write('q');
+      assert.equal(await done, 0, JSON.stringify(args));
+      assert.ok(!t.out().includes('\x1b[?1003h'), 'mouse mode enabled');
+      assert.ok(!fake.received.slice(before).some((m) => m.method.startsWith('Input.')), 'input reached the page');
+    }
+  } finally {
+    await fake.close();
+  }
+});
+
+test('browse passes null as the control agent id (standalone browsers never write a control file); --watch passes interactive: false', { skip, timeout: 60_000 }, async () => {
   const t = fakeTerm();
   let opts;
   const code = await runBrowse('about:blank', {
-    ...t, pid: fakeChrome().pid, viewer: async (o) => { opts = o; return 0; },
+    ...t, pid: fakeChrome().pid, watch: true, viewer: async (o) => { opts = o; return 0; },
   });
   assert.equal(code, 0);
+  assert.equal(opts.interactive, false, '--watch');
   assert.equal(opts.control.agentId, null);
   assert.equal(opts.control.idleReturnMs, 300_000);
 });
