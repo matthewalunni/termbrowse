@@ -33,7 +33,7 @@ const ROWS = 40;
 const CELL_W = 10;
 const CELL_H = 20;
 const USER = 'alice';
-const PASSWORD = 'p@ss!word';
+const TEST_INPUT = 'Hello e2e!'; // typed into the page's second field
 const NOTE_PREFIX = 'Note from termbrowse: the user took control of this browser for';
 const ESC = '\x1b';
 
@@ -115,7 +115,8 @@ function startSite() {
         const form = new URLSearchParams(body);
         res.setHeader('content-type', 'text/html; charset=utf-8');
         res.end(`<!doctype html><title>Logged in</title><body style="font: 28px sans-serif; margin: 40px">`
-          + `<p id="result">Logged in as ${escapeHtml(form.get('username') ?? '')} with ${escapeHtml(form.get('password') ?? '')}</p></body>`);
+          + `<p id="result">Logged in as ${escapeHtml(form.get('username') ?? '')} with ${escapeHtml(form.get('password') ?? '')}</p>`
+          + '<p><a id="again" href="/">Back to the form</a></p></body>');
       });
       return;
     }
@@ -277,14 +278,21 @@ function startViewer(env) {
 }
 
 // Kitty keyboard protocol (flags 29: disambiguate, alternate keys, all keys as escapes, text).
-const SHIFTED = { '!': '1', '@': '2', '#': '3', $: '4', '%': '5', '^': '6', '&': '7', '*': '8', '(': '9', ')': '0' };
+const SHIFTED = { ':': ';', '!': '1', '@': '2', '#': '3', $: '4', '%': '5', '^': '6', '&': '7', '*': '8', '(': '9', ')': '0' };
 function kittyChar(ch) {
   const cp = ch.codePointAt(0);
   if (SHIFTED[ch]) return `${ESC}[${SHIFTED[ch].codePointAt(0)}:${cp};2;${cp}u`;
   if (/[A-Z]/.test(ch)) return `${ESC}[${ch.toLowerCase().codePointAt(0)}:${cp};2;${cp}u`;
   return `${ESC}[${cp};;${cp}u`;
 }
-const KITTY = { enter: `${ESC}[13u`, ctrlBracket: `${ESC}[93;5u`, g: kittyChar('g'), q: kittyChar('q') };
+const KITTY = { enter: `${ESC}[13u`, esc: `${ESC}[27u` };
+const typeKeys = async (v, text) => {
+  for (const ch of text) {
+    v.write(kittyChar(ch));
+    await sleep(25);
+  }
+};
+const HINTS_OVERLAY = '__termbrowse_hints'; // src/pageops.js OVERLAY_ID
 
 // --- the run ----------------------------------------------------------------------------------
 
@@ -345,15 +353,15 @@ async function main() {
     // 3
     await step('viewer runs in a pty, gets its size/keyboard answers and draws frames', 30000, async () => {
       viewer = startViewer(env);
-      await until(() => viewer.place && viewer.tail.includes(`agent · ${loginUrl}`), {
-        timeoutMs: 25000, what: 'a frame and an `agent · <login url>` status row',
+      await until(() => viewer.place && viewer.tail.includes(`NORMAL · agent driving · ${loginUrl}`), {
+        timeoutMs: 25000, what: 'a frame and a `NORMAL · agent driving · <login url>` status row',
       });
       for (const q of ['16t', '14t', 'c', '?u']) assert(viewer.queries.includes(q), `viewer never sent the ${q} query`);
       info(`queries answered: ${viewer.queries.join(' ')}; frames ${viewer.frames}; image ${viewer.place.cols}x${viewer.place.rows} cells`);
     });
 
     // 4
-    await step(`user clicks the password field and types ${PASSWORD} + Enter through the pty`, 20000, async () => {
+    await step(`user clicks the second field (Insert), types ${TEST_INPUT} + Enter through the pty`, 20000, async () => {
       const target = (await listTargets(port)).find((t) => t.type === 'page' && t.url === loginUrl);
       assert(target, 'login page target not found on the agent port');
       cdp = await CdpSession.connect(target.webSocketDebuggerUrl);
@@ -376,30 +384,31 @@ async function main() {
       const at = cellToPage(col, row, place, term, viewport);
       assert(at && at.x > box.x && at.x < box.x + box.w && at.y > box.y && at.y < box.y + box.h,
         `cell ${col},${row} maps to ${JSON.stringify(at)}, outside the field ${JSON.stringify(box)}`);
-      info(`password field ${Math.round(box.w)}x${Math.round(box.h)} at ${Math.round(box.x)},${Math.round(box.y)} -> cell col ${col} row ${row} -> page ${at.x.toFixed(1)},${at.y.toFixed(1)}`);
+      info(`field ${Math.round(box.w)}x${Math.round(box.h)} at ${Math.round(box.x)},${Math.round(box.y)} -> cell col ${col} row ${row} -> page ${at.x.toFixed(1)},${at.y.toFixed(1)}`);
 
       viewer.write(`${ESC}[<0;${col};${row}M`);
       await sleep(60);
       viewer.write(`${ESC}[<0;${col};${row}m`);
-      await until(() => evaluate(`document.activeElement?.id === 'password'`), { timeoutMs: 5000, what: 'the password field to have focus' });
-      for (const ch of PASSWORD) {
-        viewer.write(kittyChar(ch));
-        await sleep(25);
-      }
-      await until(async () => (await evaluate(`document.querySelector('#password')?.value`)) === PASSWORD, {
-        timeoutMs: 5000, what: `the field to hold ${PASSWORD}`,
+      await until(() => evaluate(`document.activeElement?.id === 'password'`), { timeoutMs: 5000, what: 'the field to have focus' });
+      // Clicking a text field enters Insert; the status says so once control is confirmed.
+      await until(() => viewer.tail.includes('INSERT · you have control · Esc normal'), {
+        timeoutMs: 5000, what: 'the `INSERT · you have control` status row',
+      });
+      await typeKeys(viewer, TEST_INPUT);
+      await until(async () => (await evaluate(`document.querySelector('#password')?.value`)) === TEST_INPUT, {
+        timeoutMs: 5000, what: `the field to hold ${TEST_INPUT}`,
       });
       viewer.write(KITTY.enter);
       await until(async () => (await evaluate('location.href').catch(() => null)) === resultUrl, {
         timeoutMs: 8000, what: 'the form to submit',
       });
-      info(`keys sent: ${[...PASSWORD].map((c) => JSON.stringify(kittyChar(c).slice(1))).join(' ')} then "[13u"`);
+      info(`keys sent: ${[...TEST_INPUT].map((c) => JSON.stringify(kittyChar(c).slice(1))).join(' ')} then "[13u"`);
     });
 
     // 5
     let held;
     await step('agent tools/call while the user holds control gets no answer for 2 s; control file says held', 10000, async () => {
-      await until(() => viewer.tail.includes('you have control · Ctrl-] g to hand back'), { timeoutMs: 3000, what: 'the `you have control` status row' });
+      assert(viewer.tail.includes('INSERT · you have control'), 'the status row no longer says `INSERT · you have control`');
       const c = await readControl(AGENT, p);
       assert(c.held === true, `control file not held: ${JSON.stringify(c)}`);
       let answered = false;
@@ -412,11 +421,11 @@ async function main() {
     });
 
     // 6
-    await step('user hands back with Ctrl-] g; the held call answers with the takeover note', 10000, async () => {
+    await step('user hands back with Esc Esc (Insert -> Normal -> hand back); the held call answers with the takeover note', 10000, async () => {
       const handedAt = Date.now();
-      viewer.write(KITTY.ctrlBracket);
+      viewer.write(KITTY.esc);
       await sleep(40);
-      viewer.write(KITTY.g);
+      viewer.write(KITTY.esc);
       const r = await held;
       const all = texts(r);
       const note = all.find((tx) => tx.startsWith(NOTE_PREFIX));
@@ -424,16 +433,19 @@ async function main() {
       assert(note.includes(`it is now at ${resultUrl}.`), `note doesn't name ${resultUrl}: ${note}`);
       const c = await readControl(AGENT, p);
       assert(c.held === false, 'control file still held after the hand-back');
+      await until(() => viewer.tail.includes(`NORMAL · agent driving · ${resultUrl}`), {
+        timeoutMs: 3000, what: 'the `NORMAL · agent driving · <result url>` status row',
+      });
       info(`answered ${Date.now() - handedAt} ms after the hand-back`);
       info(`note: ${note}`);
     });
 
     // 7
-    const shot = await step('page shows the login with the exact password; agent take_screenshot saved', 20000, async () => {
+    const shot = await step('page shows the exact typed text; agent take_screenshot saved', 20000, async () => {
       const text = (await cdp.send('Runtime.evaluate', {
         expression: `document.querySelector('#result')?.textContent`, returnByValue: true,
       })).result.value;
-      assert(text === `Logged in as ${USER} with ${PASSWORD}`, `page says ${JSON.stringify(text)}`);
+      assert(text === `Logged in as ${USER} with ${TEST_INPUT}`, `page says ${JSON.stringify(text)}`);
       // chrome-devtools-mcp routes page tools by pageId: find the page's id as the agent would.
       const pages = await agent.callTool('list_pages');
       assert(!texts(pages).some((tx) => tx.startsWith(NOTE_PREFIX)), 'the note was repeated on a later call');
@@ -455,10 +467,27 @@ async function main() {
     void shot;
 
     // 8
-    await step('Ctrl-] q quits the viewer with exit 0 and restores the terminal', 10000, async () => {
-      viewer.write(KITTY.ctrlBracket);
-      await sleep(40);
-      viewer.write(KITTY.q);
+    await step('f shows link hint labels in the page; Esc removes them', 10000, async () => {
+      const overlay = async () => (await cdp.send('Runtime.evaluate', {
+        expression: `(() => { const o = document.getElementById(${JSON.stringify(HINTS_OVERLAY)}); return o ? o.children.length : -1; })()`,
+        returnByValue: true,
+      })).result.value;
+      assert((await overlay()) === -1, 'hint labels in the page before f');
+      viewer.write(kittyChar('f'));
+      const labels = await until(async () => { const n = await overlay(); return n > 0 && n; }, {
+        timeoutMs: 5000, what: 'the hint overlay in the page',
+      });
+      assert(viewer.tail.includes('f: type a label'), 'the status row never said `f: type a label`');
+      viewer.write(KITTY.esc);
+      await until(async () => (await overlay()) === -1, { timeoutMs: 5000, what: 'Esc to remove the hint overlay' });
+      info(`overlay #${HINTS_OVERLAY} had ${labels} label(s); gone after Esc`);
+    });
+
+    // 9
+    await step(':q quits the viewer with exit 0 and restores the terminal', 10000, async () => {
+      await typeKeys(viewer, ':q');
+      await until(() => viewer.tail.includes(':q█'), { timeoutMs: 3000, what: 'the `:q█` command line' });
+      viewer.write(KITTY.enter);
       const { code, signal } = await viewer.exited;
       assert(code === 0, `viewer exited ${code ?? signal}; stderr: ${viewer.stderr}`);
       const end = viewer.tail.slice(-400);
@@ -470,7 +499,7 @@ async function main() {
       viewer = null;
     });
 
-    // 9
+    // 10
     await step('agent closes (stdin end): its Chrome is gone and the registry is empty', 20000, async () => {
       cdp?.close();
       cdp = null;
