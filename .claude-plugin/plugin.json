@@ -17,9 +17,10 @@
   ],
   "mcpServers": {
     "chrome-devtools": {
-      "command": "termbrowse",
+      "command": "sh",
       "args": [
-        "mcp"
+        "-c",
+        "if command -v termbrowse >/dev/null 2>&1; then exec termbrowse mcp; else exec npx -y termbrowse mcp; fi"
       ]
     }
   }

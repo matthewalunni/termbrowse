@@ -93,8 +93,9 @@ async function checkKitty(stdin, stdout, env) {
   return ['warn', 'no answer to the query, so the viewer will refuse to draw here; if this terminal does draw Kitty graphics, set TERMBROWSE_ASSUME_KITTY=1'];
 }
 
-// The Claude Code plugin's MCP server runs the bare command `termbrowse`, so it has to resolve
-// on PATH: the first PATH entry holding an executable file of that name, as a shell would find it.
+// The Claude Code plugin's MCP server runs the bare command `termbrowse` when it resolves on PATH
+// (else `npx -y termbrowse`): the first PATH entry holding an executable file of that name, as a
+// shell would find it.
 export async function checkOnPath(env) {
   for (const dir of (env.PATH ?? '').split(delimiter)) {
     if (!dir) continue;
@@ -107,7 +108,7 @@ export async function checkOnPath(env) {
       // not here; keep looking
     }
   }
-  return ['warn', 'the Claude Code plugin runs `termbrowse` from PATH — install with npm i -g or npm link'];
+  return ['warn', 'not found: the Claude Code plugin falls back to `npx -y termbrowse` (needs Node); to put it on PATH, npm i -g termbrowse or brew install matthewalunni/tap/termbrowse'];
 }
 
 export async function runDoctor(

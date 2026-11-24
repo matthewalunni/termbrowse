@@ -34,7 +34,7 @@ test('checkOnPath finds an executable termbrowse on PATH and warns when there is
     await chmod(join(notExec, 'termbrowse'), 0o644);
     await writeFile(join(good, 'termbrowse'), '#!/bin/sh\n');
     await chmod(join(good, 'termbrowse'), 0o755);
-    const warn = ['warn', 'the Claude Code plugin runs `termbrowse` from PATH — install with npm i -g or npm link'];
+    const warn = ['warn', 'not found: the Claude Code plugin falls back to `npx -y termbrowse` (needs Node); to put it on PATH, npm i -g termbrowse or brew install matthewalunni/tap/termbrowse'];
     assert.deepEqual(await checkOnPath({ PATH: [empty, notExec].join(delimiter) }), warn);
     assert.deepEqual(await checkOnPath({}), warn);
     assert.deepEqual(await checkOnPath({ PATH: ['', empty, notExec, good].join(delimiter) }), ['ok', join(good, 'termbrowse')]);

@@ -4,18 +4,49 @@
   "description": "Chrome in your terminal via Kitty graphics, plus one Chrome per AI agent",
   "type": "module",
   "license": "MIT",
-  "private": true,
-  "bin": { "termbrowse": "bin/termbrowse.js" },
-  "files": ["bin/", "src/"],
-  "engines": { "node": ">=22" },
+  "author": "Matthew Alunni",
+  "homepage": "https://github.com/matthewalunni/termbrowse#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/matthewalunni/termbrowse.git"
+  },
+  "bugs": {
+    "url": "https://github.com/matthewalunni/termbrowse/issues"
+  },
+  "keywords": [
+    "browser",
+    "chrome",
+    "mcp",
+    "terminal",
+    "kitty",
+    "ai-agent",
+    "chrome-devtools"
+  ],
+  "os": [
+    "darwin",
+    "linux"
+  ],
+  "bin": {
+    "termbrowse": "bin/termbrowse.js"
+  },
+  "files": [
+    "bin/",
+    "src/"
+  ],
+  "engines": {
+    "node": ">=22"
+  },
   "scripts": {
     "test": "node --test 'test/**/*.test.js'",
-    "e2e": "node test/e2e/takeover.e2e.mjs"
+    "e2e": "node test/e2e/takeover.e2e.mjs",
+    "prepublishOnly": "npm test"
   },
   "dependencies": {
     "@puppeteer/browsers": "^3.2.7",
     "chrome-devtools-mcp": "1.13.0",
     "smol-toml": "^1.9.1"
   },
-  "devDependencies": { "ws": "^8.23.0" }
+  "devDependencies": {
+    "ws": "^8.23.0"
+  }
 }
