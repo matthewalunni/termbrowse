@@ -194,6 +194,18 @@ test('tabs: next/prev pick the neighbour (wrapping), new creates, close keeps th
   await cdp.close();
 });
 
+test('tabs: closing a tab that is not listed says it could not find it', async () => {
+  const cdp = await tabsFake(['A', 'B']);
+  const browser = await CdpSession.connect(cdp.wsUrl);
+  try {
+    await assert.rejects(ops.tabs(browser, 'close', 'Z'), { message: "couldn't find this tab" });
+    assert.equal(cdp.received.filter((r) => r.method === 'Target.closeTarget').length, 0);
+  } finally {
+    browser.close();
+    await cdp.close();
+  }
+});
+
 test('tabs: close refuses the last page; next with one page stays put', async () => {
   const cdp = await tabsFake(['A']);
   const browser = await CdpSession.connect(cdp.wsUrl);

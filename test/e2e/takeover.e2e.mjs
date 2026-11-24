@@ -33,7 +33,7 @@ const ROWS = 40;
 const CELL_W = 10;
 const CELL_H = 20;
 const USER = 'alice';
-const TEST_INPUT = 'Hello e2e!'; // typed into the page's second field
+const TEST_INPUT = 'Hello e2e!@#'; // typed into the page's second field (@ and # are shifted keys)
 const NOTE_PREFIX = 'Note from termbrowse: the user took control of this browser for';
 const ESC = '\x1b';
 
@@ -408,6 +408,9 @@ async function main() {
     // 5
     let held;
     await step('agent tools/call while the user holds control gets no answer for 2 s; control file says held', 10000, async () => {
+      // A plain assert (no wait) is safe: step 4 waited for this status row, nothing since changes
+      // the mode (Enter in Insert goes to the page; a navigation keeps the mode), and every frame
+      // drawn ends with the status row, so the 64 KiB tail always holds the current one.
       assert(viewer.tail.includes('INSERT · you have control'), 'the status row no longer says `INSERT · you have control`');
       const c = await readControl(AGENT, p);
       assert(c.held === true, `control file not held: ${JSON.stringify(c)}`);

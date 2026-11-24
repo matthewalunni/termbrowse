@@ -371,7 +371,8 @@ function isTab(info) {
 }
 
 // op: 'next' | 'prev' | 'new' | 'close'. Returns the tab to show now, or null when nothing changed
-// (close never closes the last tab; next/prev with one tab). Order: Target.getTargets.
+// (close never closes the last tab; next/prev with one tab). Close throws "couldn't find this tab"
+// when the current tab isn't listed. Order: Target.getTargets.
 // Never Target.activateTarget: on macOS it can bring Chrome's window to the front and take focus;
 // the viewer just shows the returned tab.
 export async function tabs(browser, op, currentTargetId) {
@@ -384,7 +385,8 @@ export async function tabs(browser, op, currentTargetId) {
   const pages = targetInfos.filter(isTab).map((t) => t.targetId);
   const i = pages.indexOf(currentTargetId);
   if (op === 'close') {
-    if (i < 0 || pages.length < 2) return null;
+    if (i < 0) throw new Error("couldn't find this tab");
+    if (pages.length < 2) return null;
     const next = pages[i + 1] ?? pages[i - 1];
     await browser.send('Target.closeTarget', { targetId: currentTargetId });
     return { targetId: next };

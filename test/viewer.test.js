@@ -2,7 +2,7 @@ import { test, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
 import { PassThrough } from 'node:stream';
-import { runViewer, nextEveryNth, keyQuits, followable, escFlushMs, MODES_OFF } from '../src/viewer.js';
+import { runViewer, nextEveryNth, keyQuits, followable, escFlushMs, MODES_OFF, helpLines } from '../src/viewer.js';
 import { kittyQuery, leaveScreen, deleteAll } from '../src/kitty.js';
 import { startFakeCdp } from './helpers/fake-cdp.js';
 import fs from 'node:fs/promises';
@@ -893,6 +893,9 @@ test('interactive: Ctrl-C goes to the page in Insert; after Esc it quits', async
   let done = false;
   p.then(() => { done = true; });
   click(t, 10, 5);
+  // Ctrl-C outside Insert quits even past keys held behind the click's focus check: let it end.
+  await until(() => methods(fake, 'Runtime.evaluate').length === 1);
+  await sleep(50);
   t.stdin.write('q'); // unmapped in Normal: dropped
   t.stdin.write('i');
   t.stdin.write('q');
@@ -1307,10 +1310,10 @@ test('vim: status lines name the mode, who drives and the way out', async () => 
   await until(() => lastStatus(t) === 'INSERT · Esc normal');
   t.stdin.write(ESC_KEY);
   t.stdin.write(':o exa');
-  await until(() => lastStatus(t) === ':o exa█');
+  await until(() => lastStatus(t) === ':o exa█ · Esc cancel');
   t.stdin.write(ESC_KEY);
   t.stdin.write('/fo');
-  await until(() => lastStatus(t) === '/fo█');
+  await until(() => lastStatus(t) === '/fo█ · Esc cancel');
   t.stdin.write('o\r');
   await until(() => lastStatus(t) === 'match 1/3');
   t.signals.emit('SIGTERM');
@@ -1445,7 +1448,7 @@ test('vim: f labels links in the page; typing a label clicks its centre and remo
   const p0 = paths({ HOME: home });
   const { t, p } = await startVim(agentOpts(home));
   t.stdin.write('f');
-  await until(() => evals('showHintsInPage').length === 1 && lastStatus(t) === 'f: type a label');
+  await until(() => evals('showHintsInPage').length === 1 && lastStatus(t) === 'f: type a label · Esc cancel');
   await untilAsync(async () => (await readControl('ag1', p0)).held); // hints change the agent's page
   t.stdin.write('s');
   await until(() => mouse().length === 2);
@@ -1464,7 +1467,7 @@ test('vim: hint labels are removed on every exit (Esc, Ctrl-C, idle hand back, S
   const p0 = paths({ HOME: home });
   const showHints = async (t) => {
     t.stdin.write('f');
-    await until(() => evals('showHintsInPage').length === 1 && lastStatus(t) === 'f: type a label');
+    await until(() => evals('showHintsInPage').length === 1 && lastStatus(t) === 'f: type a label · Esc cancel');
   };
   { // Esc
     const { t, p } = await startVim(agentOpts(home));
@@ -1531,7 +1534,7 @@ test('vim: find highlights are cleared on every exit (Esc on the / line, :q, han
   { // Esc while typing the search
     const { t, p } = await startVim(agentOpts(home));
     t.stdin.write('/fo');
-    await until(() => lastStatus(t) === '/fo█');
+    await until(() => lastStatus(t) === '/fo█ · Esc cancel');
     t.stdin.write(ESC_KEY);
     await until(() => findClears().length === 1);
     t.signals.emit('SIGTERM');
@@ -1612,7 +1615,7 @@ test('vim: a hint click the page never answers (alert) does not trap :q or Ctrl-
     const { p } = start(t, agentOpts(home));
     await until(() => count(t.out(), 'a=T,f=100') === 1);
     t.stdin.write('f');
-    await until(() => lastStatus(t) === 'f: type a label');
+    await until(() => lastStatus(t) === 'f: type a label · Esc cancel');
     t.stdin.write('s');
     await until(() => mouse().some((m) => m.type === 'mouseReleased'));
     const at = Date.now();
@@ -1652,4 +1655,102 @@ test('vim: x on a tab whose neighbour cannot be reached falls back to another ta
   assert.equal(done, false);
   t.signals.emit('SIGTERM');
   assert.equal(await p, 0);
+});
+
+test('vim: clicks on a stuck page never hold :q past the gate cap; Ctrl-C quits at once even with keys held', async () => {
+  const home = await tmpHome();
+  const p0 = paths({ HOME: home });
+  const never = () => new Promise(() => {});
+  // A frozen page (alert): it answers no click release and no evaluate.
+  const handlers = { ...pageFake(), 'Runtime.evaluate': never, 'Input.dispatchMouseEvent': (params) => (params.type === 'mouseReleased' ? never() : {}) };
+  for (const quit of [':q\r', 'j\x03']) {
+    fake = await startDrawing(1037, 1443, { handlers });
+    const t = fakeTerm();
+    const { p } = start(t, agentOpts(home));
+    await until(() => count(t.out(), 'a=T,f=100') === 1);
+    for (let i = 0; i < 5; i++) click(t, 10 + i * 3, 5);
+    await until(() => mouse().filter((m) => m.type === 'mouseReleased').length === 5);
+    const at = Date.now();
+    t.stdin.write(quit);
+    assert.equal(await p, 0);
+    const took = Date.now() - at;
+    if (quit === ':q\r') assert.ok(took < 3500, `:q waited ${took} ms`);
+    else assert.ok(took < 1000, `Ctrl-C waited ${took} ms`);
+    assert.ok(evals('activeIsEditableInPage').length <= 2, `focus checks were not coalesced: ${evals('activeIsEditableInPage').length}`);
+    assert.equal((await readControl('ag1', p0)).held, false, 'handed back');
+    await fake.close();
+  }
+});
+
+test('vim: a tab F (or a click) opens and the viewer follows while the user holds control records tabsChanged', async () => {
+  const home = await tmpHome();
+  const p0 = paths({ HOME: home });
+  const ws = { get webSocketDebuggerUrl() { return fake.wsUrl; } };
+  const tab = (id, url) => Object.defineProperties({ id, type: 'page', url, title: id }, Object.getOwnPropertyDescriptors(ws));
+  const listed = [tab('T1', 'https://example.com/')];
+  const { t, p } = await startVim(agentOpts(home), {}, listed);
+  await until(() => methods(fake, 'Target.setDiscoverTargets').length >= 1);
+  t.stdin.write('F');
+  await until(() => evals('showHintsInPage').length === 1);
+  t.stdin.write('s');
+  await until(() => mouse().some((m) => m.type === 'mouseReleased'));
+  assert.ok(mouse().some((m) => m.modifiers === 2 || m.modifiers === 4), 'F clicks with the new-tab modifier');
+  await untilAsync(async () => (await readControl('ag1', p0)).held);
+  const enables = methods(fake, 'Page.enable').length;
+  listed.push(tab('T2', 'https://two.test/'));
+  fake.send({ method: 'Target.targetCreated', params: { targetInfo: { targetId: 'T2', type: 'page', openerId: 'T1', url: 'https://two.test/' } } });
+  await until(() => methods(fake, 'Page.enable').length > enables);
+  t.stdin.write(':done\r');
+  await untilAsync(async () => !(await readControl('ag1', p0)).held);
+  assert.equal((await readControl('ag1', p0)).lastTakeover.tabsChanged, true);
+  t.signals.emit('SIGTERM');
+  assert.equal(await p, 0);
+});
+
+test('vim: find highlights are cleared before H / L and when the page navigates', async () => {
+  const home = await tmpHome();
+  const { t, p } = await startVim(agentOpts(home));
+  t.stdin.write('/foo\r');
+  await until(() => lastStatus(t) === 'match 1/3');
+  t.stdin.write('H');
+  await until(() => methods(fake, 'Page.getNavigationHistory').length === 1);
+  await until(() => findClears().length === 1);
+  const order = fake.received.map((m) => (m.method === 'Runtime.evaluate' && /, null, null\)$/.test(m.params.expression) ? 'clear' : m.method));
+  assert.ok(order.indexOf('clear') < order.indexOf('Page.getNavigationHistory'), 'find cleared before going back');
+  t.stdin.write('/foo\r');
+  await until(() => evals('findInPage').filter((m) => /"foo"/.test(m.params.expression)).length === 2);
+  fake.send({ method: 'Page.frameNavigated', params: { frame: { id: 'F1', url: 'https://example.com/next' } } });
+  await until(() => findClears().length === 2);
+  t.signals.emit('SIGTERM');
+  assert.equal(await p, 0);
+});
+
+test('vim: paused in Insert says Esc normal; sub-states say Esc cancel', async () => {
+  const { t, p, controls } = await startVim();
+  await until(() => controls());
+  t.stdin.write('f');
+  await until(() => lastStatus(t) === 'f: type a label · Esc cancel');
+  t.stdin.write(ESC_KEY);
+  await until(() => (lastStatus(t) ?? '').startsWith('NORMAL'));
+  t.stdin.write(':o ex');
+  await until(() => lastStatus(t) === ':o ex█ · Esc cancel');
+  t.stdin.write(ESC_KEY);
+  t.stdin.write('/fo');
+  await until(() => lastStatus(t) === '/fo█ · Esc cancel');
+  t.stdin.write(ESC_KEY);
+  t.stdin.write('i');
+  await until(() => lastStatus(t) === 'INSERT · Esc normal');
+  Object.assign(t.size, { cols: 600, rows: 40, pxW: 10200, pxH: 1480 });
+  await controls().resize();
+  await until(() => lastStatus(t) === 'paused (pane too small or too large) · Esc normal');
+  t.signals.emit('SIGTERM');
+  assert.equal(await p, 0);
+});
+
+test('helpLines: :q, Esc and :done come first, so a short pane keeps the way out', () => {
+  const lines = helpLines(80, 5);
+  assert.equal(lines.length, 5);
+  assert.match(lines[2], /^ {2}:q /);
+  assert.match(lines[3], /^ {2}Esc /);
+  assert.match(lines[4], /^ {2}:done /);
 });

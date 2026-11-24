@@ -69,15 +69,18 @@ const MATCH_NOTE_MS = 3000;
 const GATE_MS = 2500; // longest a page check / hint pick / tab op holds key events
 const PAGE_CLEANUP_MS = 2100; // hint labels / find highlights on exit (pageops gives up after 2 s)
 
-// The vim-mode keys, for the help page (?, :help) and the README.
+// The vim-mode keys, for the help page (?, :help) and the README. The way out comes first, so a
+// short pane still shows it.
 export const KEY_HELP = [
+  [':q', 'quit (Ctrl-C too, in Normal)'],
+  ['Esc', 'Insert → Normal; in Normal, hand control back'],
+  [':done', 'hand control back to the agent'],
   ['j k / h l', 'scroll down / up / left / right'],
   ['d u', 'half a page down / up'],
   ['gg G', 'top / bottom'],
   ['f F', 'link hints: type a label to click it (F: in a new tab)'],
   ['gi', 'focus the first text field (Insert)'],
   ['i', 'Insert: keys go to the page'],
-  ['Esc', 'Insert → Normal; in Normal, hand control back'],
   ['/ n N', 'find; next / previous match'],
   ['H L', 'back / forward'],
   ['r', 'reload'],
@@ -85,9 +88,7 @@ export const KEY_HELP = [
   ['t x', 'new tab / close tab'],
   ['yy', 'copy the URL'],
   [':o <url>', 'open a URL'],
-  [':done', 'hand control back to the agent'],
   [':esc', 'send Escape to the page'],
-  [':q', 'quit (Ctrl-C too, in Normal)'],
   ['?', 'this help'],
 ];
 
@@ -241,13 +242,15 @@ export async function runViewer({
     if (gone) return 'disconnected'.slice(0, width);
     if (helpShown) return 'help · any key to close'.slice(0, width);
     const { mode, line } = modes.state();
-    if (paused && mode !== 'command') return 'paused (pane too small or too large) · :q quit'.slice(0, width);
+    if (paused && mode !== 'command') return `paused (pane too small or too large) · ${mode === 'insert' ? 'Esc normal' : ':q quit'}`.slice(0, width);
     if (mode === 'command' || mode === 'find') {
       const text = `${mode === 'command' ? ':' : '/'}${line}█`;
-      return text.length > width ? text.slice(text.length - width) : text; // keep the cursor end in view
+      // The hint is cut first; past that, keep the cursor end of the line in view.
+      if (text.length <= width) return `${text} · Esc cancel`.slice(0, width);
+      return text.slice(text.length - width);
     }
     if (note && note.until > Date.now()) return note.text.slice(0, width);
-    if (mode === 'hints') return 'f: type a label'.slice(0, width);
+    if (mode === 'hints') return 'f: type a label · Esc cancel'.slice(0, width);
     const mine = !!agentId && holding && confirmed;
     if (mode === 'insert') return (mine ? 'INSERT · you have control · Esc normal' : 'INSERT · Esc normal').slice(0, width);
     if (mine) return `NORMAL · you have control · Esc or :done hand back · ${url}`.slice(0, width);
@@ -347,8 +350,9 @@ export async function runViewer({
     if (method === 'Page.screencastFrame') onFrame(params);
     else if (method === 'Page.frameNavigated' && params?.frame && !params.frame.parentId) {
       url = params.frame.url ?? url;
-      // A new document has no labels or highlights.
-      findOn = false;
+      // A new document has no labels; a page restored from the back/forward cache may still have
+      // highlights, so they are cleared.
+      if (findOn) clearFindNow();
       if (hintsOn) cancelHints();
       if (!paused && !closing) setStatus(fpsSuffix(), true);
     }
@@ -359,7 +363,7 @@ export async function runViewer({
     closing = true;
     clearInterval(ticker);
     clearTimeout(resizeTimer);
-    for (const timer of [escTimer, idleTimer, noteTimer, moveTimer]) clearTimeout(timer);
+    for (const timer of [escTimer, idleTimer, noteTimer, moveTimer, holdTimer]) clearTimeout(timer);
     note = null;
     stdin.removeListener('data', onKey);
     for (const [sig, fn] of sigHandlers) signals.removeListener(sig, fn);
@@ -444,6 +448,7 @@ export async function runViewer({
   let following = null; // the tab a switch is on its way to (a tab op and discovery may both name it)
   const follow = (targetId, newUrl) => {
     if (targetId === following) return;
+    markTabsChanged(); // F, or a click that opened a tab, while the user holds control
     following = targetId;
     const seq = ++latestSwitch;
     switching = switching.then(() => (seq === latestSwitch ? switchTo(targetId, newUrl, seq) : undefined));
@@ -658,9 +663,17 @@ export async function runViewer({
   // --- key and paste events wait while a page check runs ---
   // After a click, a hint pick or gi the viewer asks the page whether a text field has focus;
   // keys typed meanwhile must land in the mode that answer sets, so they are held until then.
+  // Each check is bounded by GATE_MS, and so is the total time a key waits: once the first held
+  // key has waited GATE_MS the gate is dropped and the held keys run (checks queued behind a
+  // stuck page would otherwise add up).
   let gate = null;
   let gateSeq = 0;
-  const held = [];
+  const held = []; // {ev, at}
+  let holdTimer = null;
+  const hold = (ev) => {
+    held.push({ ev, at: Date.now() });
+    if (!holdTimer) holdTimer = setTimeout(drain, GATE_MS);
+  };
   const gated = (work) => {
     const seq = ++gateSeq;
     // Bounded: a page stuck on alert() never answers a click or a Target call, and keys
@@ -674,7 +687,12 @@ export async function runViewer({
     return g;
   };
   const drain = () => {
-    while (held.length && !gate && !closing) runActions(modes.handle(held.shift(), Date.now()));
+    clearTimeout(holdTimer);
+    holdTimer = null;
+    if (closing) return;
+    if (gate && held.length && Date.now() - held[0].at >= GATE_MS) gate = null; // waited long enough
+    while (held.length && !gate && !closing) runActions(modes.handle(held.shift().ev, Date.now()));
+    if (held.length && !closing) holdTimer = setTimeout(drain, Math.max(0, held[0].at + GATE_MS - Date.now()));
   };
 
   // Only focus the user caused switches modes: called after their click, hint pick, gi, or a
@@ -693,7 +711,16 @@ export async function runViewer({
     modes.setMode(editable ? 'insert' : 'normal');
     showStatus();
   };
-  const checkFocus = () => gated(checkFocusNow);
+  // Coalesced: a check queued and not started yet answers for the later ones too.
+  let focusQueued = false;
+  const checkFocus = () => {
+    if (focusQueued) return gate;
+    focusQueued = true;
+    return gated(() => {
+      focusQueued = false;
+      return checkFocusNow();
+    });
+  };
 
   // A page operation; a failure is shown, never thrown.
   const pageOp = (fn) => {
@@ -765,6 +792,12 @@ export async function runViewer({
   });
 
   // --- tabs ---
+  // The user changed tabs while holding control: the agent must re-select its page.
+  const markTabsChanged = () => {
+    if (!agentId || !holding || tabsChanged) return;
+    tabsChanged = true;
+    queueControl(() => touchControl(agentId, { viewerPid: process.pid, url, idleReturnMs, tabsChanged: true }, statePaths));
+  };
   const tabOp = (op) => {
     if (!browser) {
       flash('tabs are not ready yet', FAIL_NOTE_MS);
@@ -787,10 +820,7 @@ export async function runViewer({
         flash(op === 'close' ? "won't close the last tab" : 'no other tab', FAIL_NOTE_MS);
         return;
       }
-      if (agentId && holding) {
-        tabsChanged = true;
-        queueControl(() => touchControl(agentId, { viewerPid: process.pid, url, idleReturnMs, tabsChanged: true }, statePaths));
-      }
+      markTabsChanged();
       if (r.targetId !== current) follow(r.targetId);
     });
   };
@@ -823,6 +853,7 @@ export async function runViewer({
       case 'halfPage': pageOp((s) => ops.halfPage(s, a.dir, centre())); break;
       case 'scrollTo': pageOp((s) => ops.scrollTo(s, a.where)); break;
       case 'history':
+        if (findOn) clearFindNow(); // a page from the back/forward cache keeps its highlights
         pageOp(async (s) => {
           if (!(await ops.history(s, a.dir))) flash(a.dir < 0 ? 'no page back' : 'no page forward', FAIL_NOTE_MS);
         });
@@ -978,11 +1009,10 @@ export async function runViewer({
   const onEvent = (ev) => {
     if (closing) return;
     if (ev.type === 'key' || ev.type === 'paste') {
-      // A page check is running: its answer decides the mode first. Ctrl-C outside Insert,
-      // with no keys before it still waiting, quits at once whatever the page is doing (keys
-      // already waiting keep their order; the wait is bounded by GATE_MS).
+      // A page check is running: its answer decides the mode first (keys wait at most GATE_MS).
+      // Ctrl-C outside Insert quits at once whatever the page is doing, even past waiting keys.
       const ctrlC = ev.type === 'key' && ev.ctrl && !ev.alt && !ev.meta && ev.key.toLowerCase() === 'c';
-      if (gate && !(ctrlC && !held.length && modes.state().mode !== 'insert')) held.push(ev);
+      if (gate && !(ctrlC && modes.state().mode !== 'insert')) hold(ev);
       else runActions(modes.handle(ev, Date.now()));
     } else if (ev.type === 'mouse' || ev.type === 'wheel') {
       if (helpShown) return; // nothing of the page is on screen

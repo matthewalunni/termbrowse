@@ -197,9 +197,9 @@ The viewer works like Vimium: in **Normal** mode letters are commands, and in **
 | --- | --- | --- | --- |
 | Normal | `NORMAL · …` | start; `Esc` from Insert | the commands below |
 | Insert | `INSERT · … Esc normal` | `i`, `gi`, clicking or picking a text field | go to the page; `Esc` back to Normal |
-| `:` line | `:<typed>█` | `:` | a command, then Enter; `Esc` or Backspace on an empty line cancels |
-| find | `/<typed>█` | `/` | text, then Enter: `match <i>/<n>` or `no matches`; `Esc` cancels |
-| hints | `f: type a label` | `f`, `F` | a label clicks its link or field; `Esc` cancels |
+| `:` line | `:<typed>█ · Esc cancel` | `:` | a command, then Enter; `Esc` or Backspace on an empty line cancels |
+| find | `/<typed>█ · Esc cancel` | `/` | text, then Enter: `match <i>/<n>` or `no matches`; an empty line repeats the last find; `Esc` cancels |
+| hints | `f: type a label · Esc cancel` | `f`, `F` | a label clicks its link or field; `Esc` cancels |
 | help | `help · any key to close` | `?`, `:help` | any key closes it |
 
 ### Normal keys
@@ -208,13 +208,15 @@ The same table as the help screen (`?`). A two-key sequence (`gg`, `gi`, `gt`, `
 
 | Keys | Does |
 | --- | --- |
+| `:q` | quit (Ctrl-C too, in Normal) |
+| `Esc` | Insert → Normal; in Normal, hand control back |
+| `:done` | hand control back to the agent |
 | `j` `k` / `h` `l` | scroll down / up / left / right (60 px) |
 | `d` `u` | half a page down / up |
 | `gg` `G` | top / bottom |
 | `f` `F` | link hints: type a label to click it (`F`: in a new tab) |
 | `gi` | focus the first text field (Insert) |
 | `i` | Insert: keys go to the page |
-| `Esc` | Insert → Normal; in Normal, hand control back |
 | `/` `n` `N` | find; next / previous match |
 | `H` `L` | back / forward |
 | `r` | reload |
@@ -222,12 +224,10 @@ The same table as the help screen (`?`). A two-key sequence (`gg`, `gi`, `gt`, `
 | `t` `x` | new tab / close tab |
 | `yy` | copy the URL (OSC 52) |
 | `:o <url>` | open a URL |
-| `:done` | hand control back to the agent |
 | `:esc` | send Escape to the page |
-| `:q` | quit (Ctrl-C too, in Normal) |
 | `?` | this help |
 
-Other letters do nothing in Normal; they never reach the page.
+Other letters do nothing in Normal; they never reach the page. Link hints and find cover the top document only, not pages inside iframes.
 
 ### `:` commands
 
@@ -257,7 +257,7 @@ On an agent's browser, these take control: a click, a scroll (wheel or keys), `f
 
 ### Quitting
 
-`:q` (or `:quit`) and Enter, or Ctrl-C in Normal, quit the viewer. In Insert, Ctrl-C goes to the page (to copy, or to stop a program in a web terminal): press `Esc` first. A signal (SIGINT, SIGTERM, SIGHUP, e.g. closing the pane) also quits. Quitting hands an agent's browser back.
+`:q` (or `:quit`) and Enter, or Ctrl-C in Normal, quit the viewer. Ctrl-C also quits from the `:` and `/` lines, from hints and from the help screen. In Insert, Ctrl-C goes to the page (to copy, or to stop a program in a web terminal): press `Esc` first. A signal (SIGINT, SIGTERM, SIGHUP, e.g. closing the pane) also quits. Quitting hands an agent's browser back.
 
 Clicking a pane only to focus it doesn't click the page: in terminals that report focus (Kitty, Ghostty, WezTerm and others), a press within 150 ms of the pane gaining focus is dropped, and scrolling over a pane that doesn't have focus is ignored. Terminals that don't report focus behave as if always focused.
 

@@ -67,9 +67,22 @@ test('a tab change touched into the record survives an idle (stale) release', as
   assert.equal(c.lastTakeover.tabsChanged, true);
 });
 
+test('tabsChangedAt keeps the number of the last takeover that changed tabs', async () => {
+  const p = await tmpPaths();
+  await take(p);
+  await releaseControl('a1', { url: 'https://b.test/', tabsChanged: true }, p);
+  assert.equal((await readControl('a1', p)).tabsChangedAt, 1);
+  await take(p);
+  await releaseControl('a1', { url: 'https://c.test/' }, p);
+  const c = await readControl('a1', p);
+  assert.equal(c.takeovers, 2);
+  assert.equal(c.lastTakeover.tabsChanged, false);
+  assert.equal(c.tabsChangedAt, 1, 'a later takeover without tab changes keeps it');
+});
+
 test('no file reads as not held', async () => {
   const c = await readControl('nobody', await tmpPaths());
-  assert.deepEqual(c, { held: false, takeovers: 0, lastTakeover: null, agentBusySince: null });
+  assert.deepEqual(c, { held: false, takeovers: 0, lastTakeover: null, agentBusySince: null, tabsChangedAt: 0 });
 });
 
 test('dead viewer pid is released', async () => {

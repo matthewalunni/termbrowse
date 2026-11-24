@@ -626,3 +626,19 @@ test('a takeover whose control record has tabsChanged carries the tab-change sen
     assert.ok(!n[0].includes('changed tabs'), n[0]);
   });
 });
+
+test('two takeovers between agent calls: a tab change in the first is still reported', { timeout: 30_000 }, async () => {
+  const { freePort } = await import('../src/chrome.js');
+  let reads = 0;
+  const fake = {
+    readControl: async () => (reads++ === 0
+      ? { held: false, takeovers: 0, lastTakeover: null, agentBusySince: null, tabsChangedAt: 0 }
+      : { held: false, takeovers: 2, lastTakeover: { since: 0, until: 5000, url: 'https://left/', tabsChanged: false }, agentBusySince: null, tabsChangedAt: 1 }),
+    setAgentBusy: async () => {},
+  };
+  await withStub('test-tc3', await freePort(), fake, async (call) => {
+    const n = notes(await call(1));
+    assert.equal(n.length, 1);
+    assert.ok(n[0].endsWith(' The user changed tabs; call list_pages and select_page before continuing.'), n[0]);
+  });
+});

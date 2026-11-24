@@ -176,9 +176,11 @@ export async function runMcp(
     if (c.held) return null; // the user took control mid-call: told once it ends
     if (c.takeovers < reported) reported = 0; // the file was removed and started over
     if (c.takeovers <= reported || !c.lastTakeover) return null;
+    // A takeover since the last report changed tabs, even if a later one didn't.
+    const tabsChanged = !!c.lastTakeover.tabsChanged || (c.tabsChangedAt ?? 0) > reported;
     reported = c.takeovers;
     const t = c.lastTakeover;
-    return takeoverNote({ durationMs: t.until - t.since, waited, url: await noteUrl(t), tabsChanged: t.tabsChanged });
+    return takeoverNote({ durationMs: t.until - t.since, waited, url: await noteUrl(t), tabsChanged });
   }
 
   async function announce(c) {

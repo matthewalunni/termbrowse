@@ -39,10 +39,16 @@ async function update(agentId, p, mutate) {
 
 // tabsChanged: the user switched, opened or closed tabs during the takeover (the agent must
 // re-select its page). Recorded on the holder record as it happens, so an idle release keeps it.
-const closed = (c, until, url, tabsChanged) => ({
-  ...c, holder: null, viewerPid: null, tabsChanged: false,
-  lastTakeover: { since: c.since, until, url: url ?? c.url ?? null, tabsChanged: !!(tabsChanged || c.tabsChanged) },
-});
+// tabsChangedAt: the number of the last takeover that changed tabs, kept after later takeovers,
+// so a reader that missed one (two takeovers between agent calls) still sees it.
+const closed = (c, until, url, tabsChanged) => {
+  const changed = !!(tabsChanged || c.tabsChanged);
+  return {
+    ...c, holder: null, viewerPid: null, tabsChanged: false,
+    tabsChangedAt: changed ? (c.takeovers ?? 0) : (c.tabsChangedAt ?? 0),
+    lastTakeover: { since: c.since, until, url: url ?? c.url ?? null, tabsChanged: changed },
+  };
+};
 
 const taken = (c, { viewerPid, url, idleReturnMs, tabsChanged }, now) => ({
   ...c, holder: 'user', viewerPid, url, idleReturnMs, since: now, lastInput: now, takeovers: (c.takeovers ?? 0) + 1,
@@ -81,6 +87,7 @@ export async function readControl(agentId, p = paths(), now = Date.now()) {
   const view = (c) => ({
     held: c.holder === 'user', takeovers: c.takeovers ?? 0,
     lastTakeover: c.lastTakeover ?? null, agentBusySince: c.agentBusySince ?? null,
+    tabsChangedAt: c.tabsChangedAt ?? 0,
   });
   const stale = (c) => c.holder === 'user' && (!alive(c.viewerPid) || now - c.lastInput > c.idleReturnMs);
   const c = await load(file);
