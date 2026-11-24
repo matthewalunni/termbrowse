@@ -232,7 +232,8 @@ export async function runViewer({
     const fitted = (row) => (row.length + quitHint.length <= width ? row : row.slice(0, Math.max(0, width - quitHint.length))) + quitHint;
     if (agentId) {
       const room = Math.max(0, width - suffix.length - quitHint.length - 'agent ·  · '.length);
-      return fitted(`agent · ${url.slice(0, room)} · ${suffix}`).slice(0, width);
+      const shown = url === 'about:blank' ? 'blank page · waiting for the agent' : url;
+      return fitted(`agent · ${shown.slice(0, room)} · ${suffix}`).slice(0, width);
     }
     const room = Math.max(0, width - suffix.length - quitHint.length - 2);
     return fitted(`${url.slice(0, room)}  ${suffix}`).slice(0, width);
@@ -254,6 +255,9 @@ export async function runViewer({
     const mine = !!agentId && holding && confirmed;
     if (mode === 'insert') return (mine ? 'INSERT · you have control · Esc normal' : 'INSERT · Esc normal').slice(0, width);
     if (mine) return `NORMAL · you have control · Esc or :done hand back · ${url}`.slice(0, width);
+    // An agent's browser on about:blank (its Chrome is up but it has no page open, e.g. after it
+    // closed its last page) draws as a plain white pane: say so, rather than "agent driving".
+    if (agentId && url === 'about:blank') return normalStatus(['NORMAL', 'blank page · waiting for the agent'], '', width);
     return normalStatus(agentId ? ['NORMAL', 'agent driving'] : ['NORMAL'], url, width);
   };
   const statusSeq = (text) => `${ESC}[${term.rows};1H${ESC}[2K${text}`;
@@ -558,8 +562,8 @@ export async function runViewer({
 
   // Release in the file, retrying once; a failure is shown (the agent stays blocked until this
   // viewer exits, when its dead pid releases it).
-  const release = (at, until, tabs) => queueControl(async () => {
-    const what = { url: at, until, tabsChanged: tabs };
+  const release = (at, until, tabs, idle = false) => queueControl(async () => {
+    const what = { url: at, until, tabsChanged: tabs, idle };
     try {
       await releaseControl(agentId, what, statePaths);
     } catch {
@@ -595,7 +599,7 @@ export async function runViewer({
   let takeSeq = 0; // which take a result belongs to (a give-back may come before it lands)
   // Hand control back (Esc in Normal, :done, idle; until: when the takeover ended) and return
   // to watching.
-  const giveBack = (until) => {
+  const giveBack = (until, idle = false) => {
     clearTimeout(idleTimer);
     if (!holding) return;
     holding = false;
@@ -603,7 +607,7 @@ export async function runViewer({
     takeSeq++;
     leavePage();
     if (modes.state().mode === 'insert') modes.setMode('normal');
-    release(url, until, tabsChanged);
+    release(url, until, tabsChanged, idle);
     tabsChanged = false;
     showStatus();
   };
@@ -616,7 +620,7 @@ export async function runViewer({
     if (!agentId) return;
     clearTimeout(idleTimer);
     // Idle: the takeover ended at the last input, not after the wait.
-    idleTimer = setTimeout(() => giveBack(lastInputAt), idleReturnMs);
+    idleTimer = setTimeout(() => giveBack(lastInputAt, true), idleReturnMs);
     if (!holding) {
       holding = true;
       confirmed = false;

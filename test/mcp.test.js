@@ -348,7 +348,28 @@ test('takeoverNote: exact text, seconds and minutes', () => {
   );
   assert.match(takeoverNote({ durationMs: 200, waited: false, url: 'u' }), / for 1 s /);
   assert.match(takeoverNote({ durationMs: 59400, waited: false, url: 'u' }), / for 59 s /);
-  assert.match(takeoverNote({ durationMs: 90000, waited: false, url: 'u' }), / for 2 min /);
+  assert.match(takeoverNote({ durationMs: 90000, waited: false, url: 'u' }), / for 1 min 30 s /);
+  assert.match(takeoverNote({ durationMs: 120000, waited: false, url: 'u' }), / for 2 min /);
+  assert.match(takeoverNote({ durationMs: 754000, waited: false, url: 'u' }), / for 13 min /);
+});
+
+test('takeoverNote: says how long the call waited, when known', () => {
+  assert.match(takeoverNote({ durationMs: 40000, waited: true, waitedMs: 31000, url: 'u' }), / for 40 s \(while you waited, 31 s\)\. The page/);
+  assert.match(takeoverNote({ durationMs: 40000, waited: true, waitedMs: 0, url: 'u' }), / for 40 s \(while you waited\)\. The page/);
+});
+
+test('takeoverNote: an idle return counts the whole hold and says when the last input was', () => {
+  // The step 8 case: 4 s of input, then idle_return (5 min) with no input.
+  assert.equal(
+    takeoverNote({ durationMs: 304000, waited: true, waitedMs: 290000, url: 'https://x/', how: 'idle', activeMs: 4000 }),
+    'Note from termbrowse: the user took control of this browser for 5 min 4 s (while you waited, 4 min 50 s).'
+      + ' Their last input was 4 s in; control came back automatically after 5 min with no input.'
+      + ' The page may have changed; it is now at https://x/. Re-check the page (e.g. take a snapshot) before continuing.',
+  );
+  assert.match(
+    takeoverNote({ durationMs: 7000, waited: false, url: 'u', how: 'viewer-gone', activeMs: 7000 }),
+    / for 7 s \(since your last action\)\. Their viewer closed without handing back; their last input was 7 s in\. The page/,
+  );
 });
 
 test('appendNote: one text item on a result; error.data.note on an error', () => {
@@ -393,7 +414,7 @@ test('a tools/call waits while the user holds control; pings pass; the note come
   assert.equal(n.length, 1, JSON.stringify(r));
   const here = await pageUrl('test-w');
   assert.notEqual(here, 'https://x/after');
-  assert.match(n[0], /^Note from termbrowse: the user took control of this browser for [12] s \(while you waited\)\. The page may have changed; it is now at /);
+  assert.match(n[0], /^Note from termbrowse: the user took control of this browser for [12] s \(while you waited, [12] s\)\. The page may have changed; it is now at /);
   assert.ok(n[0].endsWith(`it is now at ${here}. Re-check the page (e.g. take a snapshot) before continuing.`), n[0]);
   assert.deepEqual(notes(await w.call('list_pages')), [], 'a takeover is reported once');
   w.child.stdin.end();

@@ -41,12 +41,21 @@ async function update(agentId, p, mutate) {
 // re-select its page). Recorded on the holder record as it happens, so an idle release keeps it.
 // tabsChangedAt: the number of the last takeover that changed tabs, kept after later takeovers,
 // so a reader that missed one (two takeovers between agent calls) still sees it.
-const closed = (c, until, url, tabsChanged) => {
+//
+// lastTakeover: since (taken), until (the user's last input, or the hand-back), returnedAt (when
+// the agent got the browser back) and how it came back: 'handback' (Esc, :done, :q), 'idle'
+// (idle_return passed with no input) or 'viewer-gone' (the viewer process died).
+const closed = (c, { until, returnedAt, url, tabsChanged, how = 'handback' }) => {
   const changed = !!(tabsChanged || c.tabsChanged);
+  const since = c.since ?? 0;
+  const end = Math.max(until, since);
   return {
     ...c, holder: null, viewerPid: null, tabsChanged: false,
     tabsChangedAt: changed ? (c.takeovers ?? 0) : (c.tabsChangedAt ?? 0),
-    lastTakeover: { since: c.since, until, url: url ?? c.url ?? null, tabsChanged: changed },
+    lastTakeover: {
+      since: c.since, until: end, returnedAt: Math.max(returnedAt ?? end, end),
+      how, url: url ?? c.url ?? null, tabsChanged: changed,
+    },
   };
 };
 
@@ -75,12 +84,15 @@ export const touchControl = (agentId, holder, p = paths()) => {
     : taken(c, holder, now)));
 };
 
-// until: when the takeover ended (e.g. the last input, for an idle hand-back); default now.
+// until: when the user's part ended (the last input, for an idle hand-back); default now.
+// idle: control came back because idle_return passed (the viewer's idle timer), not by a hand-back.
 // tabsChanged: the user changed tabs during the takeover (lastTakeover.tabsChanged).
-export const releaseControl = (agentId, { url, until, tabsChanged } = {}, p = paths()) =>
-  update(agentId, p, (c) => (c.holder === 'user'
-    ? closed(c, Math.max(until ?? Date.now(), c.since ?? 0), url, tabsChanged)
-    : null));
+export const releaseControl = (agentId, { url, until, tabsChanged, idle = false } = {}, p = paths()) =>
+  update(agentId, p, (c) => {
+    if (c.holder !== 'user') return null;
+    const now = Date.now();
+    return closed(c, { until: until ?? now, returnedAt: now, url, tabsChanged, how: idle ? 'idle' : 'handback' });
+  });
 
 export async function readControl(agentId, p = paths(), now = Date.now()) {
   const file = controlPath(agentId, p);
@@ -93,10 +105,18 @@ export async function readControl(agentId, p = paths(), now = Date.now()) {
   const c = await load(file);
   if (!c) return view(blank());
   if (!stale(c)) return view(c);
-  // Viewer gone or user idle: hand back, remembering the takeover ended at the last input.
+  // Viewer gone or user idle: hand back. The user's part ended at the last input; an idle one
+  // came back idle_return after it, a dead viewer's at the last input (when it died is unknown).
   let out = c;
   await update(agentId, p, (cur) => {
-    out = stale(cur) ? closed(cur, cur.lastInput) : cur;
+    const gone = !alive(cur.viewerPid);
+    out = stale(cur)
+      ? closed(cur, {
+        until: cur.lastInput,
+        returnedAt: gone ? cur.lastInput : cur.lastInput + cur.idleReturnMs,
+        how: gone ? 'viewer-gone' : 'idle',
+      })
+      : cur;
     return out === cur ? null : out;
   });
   return view(out);

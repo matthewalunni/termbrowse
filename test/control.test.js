@@ -95,16 +95,36 @@ test('dead viewer pid is released', async () => {
   assert.equal(c.held, false);
   assert.equal(c.takeovers, 1);
   assert.equal(c.lastTakeover.url, 'https://dead.test/');
+  assert.equal(c.lastTakeover.how, 'viewer-gone');
   assert.equal((await readControl('a1', p)).held, false);
 });
 
-test('idle past idleReturnMs is released, until = lastInput', async () => {
+test('idle past idleReturnMs is released, until = lastInput, returnedAt = lastInput + idleReturnMs', async () => {
   const p = await tmpPaths();
   await take(p, { idleReturnMs: 50 });
   await sleep(80);
   const c = await readControl('a1', p);
   assert.equal(c.held, false);
   assert.ok(c.lastTakeover.until <= Date.now() - 50);
+  assert.equal(c.lastTakeover.how, 'idle');
+  assert.equal(c.lastTakeover.returnedAt, c.lastTakeover.until + 50);
+});
+
+test('a hand-back records how and returnedAt; an idle release from the viewer is how: idle', async () => {
+  const p = await tmpPaths();
+  await take(p);
+  await releaseControl('a1', { url: 'u' }, p);
+  let t = (await readControl('a1', p)).lastTakeover;
+  assert.equal(t.how, 'handback');
+  assert.equal(t.returnedAt, t.until);
+  await take(p);
+  const { since } = JSON.parse(await fs.readFile(controlPath('a1', p), 'utf8'));
+  await sleep(30);
+  await releaseControl('a1', { url: 'u', until: since + 5, idle: true }, p);
+  t = (await readControl('a1', p)).lastTakeover;
+  assert.equal(t.how, 'idle');
+  assert.equal(t.until, since + 5);
+  assert.ok(t.returnedAt >= since + 30, 'returnedAt is the release, not the last input');
 });
 
 test('touchControl keeps a held control from going idle', async () => {

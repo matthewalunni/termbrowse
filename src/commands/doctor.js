@@ -140,7 +140,7 @@ export async function runDoctor(
   if (platform === 'linux') {
     add('Display', env.DISPLAY || env.WAYLAND_DISPLAY
       ? ['ok', env.WAYLAND_DISPLAY ? `WAYLAND_DISPLAY=${env.WAYLAND_DISPLAY}` : `DISPLAY=${env.DISPLAY}`]
-      : ['warn', 'DISPLAY and WAYLAND_DISPLAY unset: Chrome runs headless and login cannot open a window']);
+      : ['warn', 'DISPLAY and WAYLAND_DISPLAY unset: Chrome runs headless. Agents and the viewer work; only `termbrowse login` needs a display (see README, termbrowse login)']);
     if (chrome.executablePath) add('Chrome libraries (ldd)', await checkLdd(chrome.executablePath));
   }
 
