@@ -130,8 +130,12 @@ export async function runLogin(
         }
       }
     }
-    await closeBrowser(chrome.port);
-    await Promise.race([exited, sleep(CLOSE_GRACE_MS)]);
+    // Quitting now (a second Ctrl-C, SIGTERM/SIGHUP) skips the graceful close, which a busy
+    // Chrome can take many seconds over: chrome.kill() below ends it within its kill grace.
+    if (code === 0) {
+      await closeBrowser(chrome.port);
+      await Promise.race([exited, sleep(CLOSE_GRACE_MS)]);
+    }
   } finally {
     polling = false;
     stdin.off('data', onData);

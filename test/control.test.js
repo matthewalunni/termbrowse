@@ -97,10 +97,18 @@ test('idle past idleReturnMs is released, until = lastInput', async () => {
 test('touchControl keeps a held control from going idle', async () => {
   const p = await tmpPaths();
   await take(p, { idleReturnMs: 150 });
-  await sleep(100);
+  const raw = async () => JSON.parse(await fs.readFile(controlPath('a1', p), 'utf8'));
+  const { since } = await raw();
+  await sleep(20);
   await touch(p);
-  await sleep(100);
-  assert.equal((await readControl('a1', p)).held, true);
+  const { lastInput } = await raw();
+  assert.ok(lastInput > since, 'touch moved lastInput');
+  // Read at a fixed clock (not the wall clock, which a loaded machine can push past the limit):
+  // idle by the take alone, not by the touch.
+  const at = lastInput + 140;
+  assert.ok(at - since > 150);
+  assert.equal((await readControl('a1', p, at)).held, true);
+  assert.equal((await readControl('a1', p, lastInput + 151)).held, false, 'idle 150 ms after the touch');
 });
 
 test('touchControl retakes a control that was released under the holder (idle or dead pid read)', async () => {

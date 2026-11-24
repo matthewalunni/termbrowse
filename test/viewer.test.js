@@ -74,6 +74,8 @@ const methods = (fake, m) => fake.received.filter((x) => x.method === m);
 let fake;
 afterEach(async () => { await fake?.close(); fake = null; });
 
+// controls() is set by onReady, after the viewer's own startup awaits: a request the fake CDP has
+// received (Page.startScreencast) can come before it, so tests wait for controls() too.
 function start(t, opts = {}) {
   let controls;
   const p = runViewer({
@@ -242,7 +244,7 @@ test('pauses on bogus size, resumes on a sane one', async () => {
   fake = await startFakeCdp();
   const t = fakeTerm();
   const { p, controls } = start(t);
-  await until(() => methods(fake, 'Page.startScreencast').length === 1);
+  await until(() => methods(fake, 'Page.startScreencast').length === 1 && controls());
   Object.assign(t.size, { cols: 600, rows: 40, pxW: 10200, pxH: 1480 });
   await controls().resize();
   assert.equal(methods(fake, 'Page.stopScreencast').length, 1);
@@ -353,7 +355,7 @@ test('fill: the page is laid out at the pane image area, again on resize, cleare
   fake = await startFakeCdp();
   const t = fakeTerm();
   const { p, controls } = start(t, { fill: true });
-  await until(() => methods(fake, 'Page.startScreencast').length === 1 && methods(fake, SET).length === 1);
+  await until(() => methods(fake, 'Page.startScreencast').length === 1 && methods(fake, SET).length === 1 && controls());
   assert.deepEqual(methods(fake, SET)[0].params, { width: 1037, height: 1443, deviceScaleFactor: 1, mobile: false });
   Object.assign(t.size, { cols: 80, rows: 25, pxW: 800, pxH: 500 });
   await controls().resize();
@@ -423,7 +425,7 @@ test('fill off: the page size is never touched', async () => {
   fake = await startFakeCdp();
   const t = fakeTerm();
   const { p, controls } = start(t, { fill: false });
-  await until(() => methods(fake, 'Page.startScreencast').length === 1);
+  await until(() => methods(fake, 'Page.startScreencast').length === 1 && controls());
   Object.assign(t.size, { cols: 80, rows: 25, pxW: 800, pxH: 500 });
   await controls().resize();
   t.stdin.write(':q\r');
@@ -636,7 +638,7 @@ test('quitting during a resize waits for it, so raw mode is restored as it was',
   fake = await startFakeCdp();
   const t = fakeTerm();
   const { p, controls } = start(t);
-  await until(() => methods(fake, 'Page.startScreencast').length === 1);
+  await until(() => methods(fake, 'Page.startScreencast').length === 1 && controls());
   const write = t.stdout.write;
   t.stdout.write = (chunk, ...rest) => {
     if (!String(chunk).includes(`${ESC}[16t`)) return write(chunk, ...rest);
@@ -985,8 +987,10 @@ test('interactive: idle return hands control back on its own', async () => {
   const p0 = paths({ HOME: home });
   const { t, p } = await startInteractive(agentOpts(home, { idleReturnMs: 100 }));
   click(t, 10, 5);
-  await untilAsync(async () => (await readControl('ag1', p0)).held);
+  // The raw file, not readControl: with a 100 ms limit a slow read would itself release it as
+  // idle (and could miss the short held window); only the viewer should hand it back here.
   const raw = () => fs.readFile(controlPath('ag1', p0), 'utf8').then(JSON.parse);
+  await untilAsync(async () => (await raw()).takeovers === 1);
   await untilAsync(async () => (await raw()).holder === null, 1000);
   await until(() => (lastStatus(t) ?? '').startsWith('NORMAL · agent driving'));
   t.signals.emit('SIGTERM');
