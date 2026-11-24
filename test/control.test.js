@@ -95,16 +95,49 @@ test('dead viewer pid is released', async () => {
   assert.equal(c.held, false);
   assert.equal(c.takeovers, 1);
   assert.equal(c.lastTakeover.url, 'https://dead.test/');
+  assert.equal(c.lastTakeover.how, 'viewer-gone');
+  // Came back when the dead viewer was noticed (now), not at the last input.
+  assert.ok(c.lastTakeover.returnedAt >= c.lastTakeover.until && c.lastTakeover.returnedAt <= Date.now());
   assert.equal((await readControl('a1', p)).held, false);
 });
 
-test('idle past idleReturnMs is released, until = lastInput', async () => {
+test('a viewer that died long ago comes back no later than idle_return after its last input', async () => {
+  const p = await tmpPaths();
+  const child = spawn(process.execPath, ['-e', '0']);
+  const pid = child.pid;
+  await new Promise((r) => child.on('exit', r));
+  await take(p, { viewerPid: pid, idleReturnMs: 1000 });
+  const c = await readControl('a1', p, Date.now() + 60_000); // read a minute later
+  assert.equal(c.lastTakeover.how, 'viewer-gone');
+  assert.equal(c.lastTakeover.returnedAt, c.lastTakeover.until + 1000);
+});
+
+test('idle past idleReturnMs is released, until = lastInput, returnedAt = lastInput + idleReturnMs', async () => {
   const p = await tmpPaths();
   await take(p, { idleReturnMs: 50 });
   await sleep(80);
   const c = await readControl('a1', p);
   assert.equal(c.held, false);
   assert.ok(c.lastTakeover.until <= Date.now() - 50);
+  assert.equal(c.lastTakeover.how, 'idle');
+  assert.equal(c.lastTakeover.returnedAt, c.lastTakeover.until + 50);
+});
+
+test('a hand-back records how and returnedAt; an idle release from the viewer is how: idle', async () => {
+  const p = await tmpPaths();
+  await take(p);
+  await releaseControl('a1', { url: 'u' }, p);
+  let t = (await readControl('a1', p)).lastTakeover;
+  assert.equal(t.how, 'handback');
+  assert.equal(t.returnedAt, t.until);
+  await take(p);
+  const { since } = JSON.parse(await fs.readFile(controlPath('a1', p), 'utf8'));
+  await sleep(30);
+  await releaseControl('a1', { url: 'u', until: since + 5, idle: true }, p);
+  t = (await readControl('a1', p)).lastTakeover;
+  assert.equal(t.how, 'idle');
+  assert.equal(t.until, since + 5);
+  assert.ok(t.returnedAt >= since + 30, 'returnedAt is the release, not the last input');
 });
 
 test('touchControl keeps a held control from going idle', async () => {

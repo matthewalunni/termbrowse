@@ -1754,3 +1754,35 @@ test('helpLines: :q, Esc and :done come first, so a short pane keeps the way out
   assert.match(lines[3], /^ {2}Esc /);
   assert.match(lines[4], /^ {2}:done /);
 });
+
+test('interactive: an agent browser that navigates to about:blank says blank page, not agent driving', async () => {
+  const home = await tmpHome();
+  const { t, p } = await startInteractive(agentOpts(home));
+  await until(() => (lastStatus(t) ?? '').startsWith('NORMAL · agent driving · '));
+  fake.send({ method: 'Page.frameNavigated', params: { frame: { id: 'F', url: 'about:blank' } } });
+  await until(() => (lastStatus(t) ?? '').startsWith('NORMAL · blank page · waiting for the agent · '));
+  fake.send({ method: 'Page.frameNavigated', params: { frame: { id: 'F', url: 'https://example.com/next' } } });
+  await until(() => (lastStatus(t) ?? '').startsWith('NORMAL · agent driving · '));
+  t.signals.emit('SIGTERM');
+  assert.equal(await p, 0);
+});
+
+test('interactive: a standalone browser on about:blank shows the URL as is', async () => {
+  const { t, p } = await startInteractive();
+  fake.send({ method: 'Page.frameNavigated', params: { frame: { id: 'F', url: 'about:blank' } } });
+  await until(() => (lastStatus(t) ?? '').startsWith('NORMAL · about:blank · f links'));
+  t.stdin.write(':q\r');
+  assert.equal(await p, 0);
+});
+
+test('watch only on an agent browser at about:blank: the status row says blank page', async () => {
+  const home = await tmpHome();
+  fake = await startDrawing();
+  const t = fakeTerm({ cols: 100 });
+  const { p } = start(t, { ...agentOpts(home), interactive: false });
+  await until(() => count(t.out(), 'a=T,f=100') === 1);
+  fake.send({ method: 'Page.frameNavigated', params: { frame: { id: 'F', url: 'about:blank' } } });
+  await until(() => (lastStatus(t) ?? '').startsWith('agent · blank page · waiting for the agent · '));
+  t.stdin.write('q');
+  assert.equal(await p, 0);
+});

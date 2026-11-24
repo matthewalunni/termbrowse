@@ -67,16 +67,30 @@ function parse(line) {
 const isToolsCall = (msg) => (Array.isArray(msg) ? msg : [msg]).some((m) => m?.method === 'tools/call');
 const isResponse = (m) => m && typeof m === 'object' && m.method === undefined && m.id !== undefined && ('result' in m || 'error' in m);
 
-const formatDuration = (ms) => {
+export const formatDuration = (ms) => {
   const s = Math.max(1, Math.round(ms / 1000));
-  return s < 60 ? `${s} s` : `${Math.round(s / 60)} min`;
+  if (s < 60) return `${s} s`;
+  if (s >= 600) return `${Math.round(s / 60)} min`;
+  return s % 60 ? `${Math.floor(s / 60)} min ${s % 60} s` : `${s / 60} min`;
 };
 
-export const takeoverNote = ({ durationMs, waited, url, tabsChanged }) =>
-  `Note from termbrowse: the user took control of this browser for ${formatDuration(durationMs)} `
-  + `(${waited ? 'while you waited' : 'since your last action'}). The page may have changed; it is now at ${url}. `
-  + 'Re-check the page (e.g. take a snapshot) before continuing.'
-  + (tabsChanged ? ' The user changed tabs; call list_pages and select_page before continuing.' : '');
+// durationMs: from the takeover to when the agent got the browser back. waitedMs: how long this
+// call was held (when waited). how/activeMs: an idle or dead-viewer return says when the user's
+// last input was, so the agent knows the page sat untouched after it.
+export const takeoverNote = ({ durationMs, waited, waitedMs, url, tabsChanged, how = 'handback', activeMs }) => {
+  const why = waited ? `while you waited${waitedMs ? `, ${formatDuration(waitedMs)}` : ''}` : 'since your last action';
+  const active = activeMs ?? durationMs;
+  const lastInput = active < 1000 ? 'Their last input was in the first second' : `Their last input was ${formatDuration(active)} in`;
+  let ended = '';
+  if (how === 'idle') {
+    ended = ` ${lastInput}; control came back automatically after ${formatDuration(durationMs - active)} with no input.`;
+  } else if (how === 'viewer-gone') {
+    ended = ` Their viewer closed without handing back. ${lastInput}.`;
+  }
+  return `Note from termbrowse: the user took control of this browser for ${formatDuration(durationMs)} (${why}).${ended}`
+    + ` The page may have changed; it is now at ${url}. Re-check the page (e.g. take a snapshot) before continuing.`
+    + (tabsChanged ? ' The user changed tabs; call list_pages and select_page before continuing.' : '');
+};
 
 // Adds the note to one response object: a text item on result.content, or, on a JSON-RPC error
 // (which has no content), error.data.note with the error otherwise unchanged.
@@ -166,7 +180,7 @@ export async function runMcp(
   }
 
   // The note for a tools/call response, if a takeover ended since the last one reported.
-  async function takeoverNoteNow(waited) {
+  async function takeoverNoteNow(waitedMs) {
     const c = await control();
     if (!c) return null;
     if (reported === null) {
@@ -180,7 +194,11 @@ export async function runMcp(
     const tabsChanged = !!c.lastTakeover.tabsChanged || (c.tabsChangedAt ?? 0) > reported;
     reported = c.takeovers;
     const t = c.lastTakeover;
-    return takeoverNote({ durationMs: t.until - t.since, waited, url: await noteUrl(t), tabsChanged });
+    const end = t.returnedAt ?? t.until; // a file from before returnedAt existed
+    return takeoverNote({
+      durationMs: end - t.since, waited: waitedMs !== null, waitedMs, url: await noteUrl(t), tabsChanged,
+      how: t.how ?? 'handback', activeMs: t.until - t.since,
+    });
   }
 
   async function announce(c) {
@@ -236,7 +254,7 @@ export async function runMcp(
   // Output: whole lines only, so a reply we write ourselves never lands inside one of the child's.
   // Lines go out in order through one chain, since a tools/call response first waits for the
   // control file (busy flag, takeover note).
-  const inFlight = new Map(); // forwarded tools/call id -> whether it waited for the user
+  const inFlight = new Map(); // forwarded tools/call id -> ms it waited for the user, or null
   let outChain = Promise.resolve();
   const emit = (fn) => {
     outChain = outChain.then(fn).catch((err) => log(`output failed: ${err.message}`));
@@ -248,13 +266,14 @@ export async function runMcp(
     const msg = parse(line);
     const done = (Array.isArray(msg) ? msg : [msg]).filter((m) => isResponse(m) && inFlight.has(m.id));
     if (!done.length) return stdout.write(line);
-    let waited = false;
+    let waitedMs = null;
     for (const m of done) {
-      waited ||= inFlight.get(m.id);
+      const w = inFlight.get(m.id);
+      if (w !== null) waitedMs = Math.max(waitedMs ?? 0, w);
       inFlight.delete(m.id);
     }
     if (!inFlight.size) await setBusy(false);
-    const note = await takeoverNoteNow(waited);
+    const note = await takeoverNoteNow(waitedMs);
     if (!note) return stdout.write(line);
     if (!Array.isArray(msg)) return stdout.write(appendNote(line, note));
     addNote(done[0], note);
@@ -321,10 +340,13 @@ export async function runMcp(
   }
 
   // Waits while the user holds control. Resolves 'free' (never held), 'waited' (released),
-  // 'cancelled', 'ended' (input closed or stopping) or 'timeout' (max_wait).
+  // 'cancelled', 'ended' (input closed or stopping) or 'timeout' (max_wait). waitStart is set to
+  // when the wait began.
+  let waitStart = 0;
   async function untilReleased(msg) {
     if (!(await control())?.held) return 'free';
     const start = Date.now();
+    waitStart = start;
     const h = { id: Array.isArray(msg) ? undefined : msg.id, cancelled: false, wake: () => {} };
     held = h;
     // Lines already queued behind this call that need not wait go now.
@@ -367,7 +389,7 @@ export async function runMcp(
       const line = queue.shift();
       const msg = parse(line);
       const call = msg !== undefined && isToolsCall(msg);
-      let waited = false;
+      let waitedMs = null;
       if (call) {
         const r = await untilReleased(msg);
         if (r === 'cancelled' || r === 'ended') continue;
@@ -375,7 +397,7 @@ export async function runMcp(
           for (const cid of callIds(msg)) reply(cid, WAIT_ERROR);
           continue;
         }
-        waited = r === 'waited';
+        if (r === 'waited') waitedMs = Date.now() - waitStart;
         try {
           await ensureChrome();
         } catch (err) {
@@ -391,7 +413,7 @@ export async function runMcp(
       if (call) {
         const ids = callIds(msg);
         if (ids.length && !inFlight.size) await setBusy(true);
-        for (const cid of ids) inFlight.set(cid, waited);
+        for (const cid of ids) inFlight.set(cid, waitedMs);
       }
       toChild(backgroundTabs && msg !== undefined ? backgroundNewPages(line) : line, msg);
     }

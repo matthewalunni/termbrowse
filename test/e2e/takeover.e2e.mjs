@@ -17,6 +17,7 @@ import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
 import { StringDecoder } from 'node:string_decoder';
+import zlib from 'node:zlib';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import { paths } from '../../src/paths.js';
@@ -34,6 +35,7 @@ const CELL_W = 10;
 const CELL_H = 20;
 const USER = 'alice';
 const TEST_INPUT = 'Hello e2e!@#'; // typed into the page's second field (@ and # are shifted keys)
+const IDLE_RETURN_S = 4; // [control] idle_return in the e2e config
 const NOTE_PREFIX = 'Note from termbrowse: the user took control of this browser for';
 const ESC = '\x1b';
 
@@ -118,6 +120,13 @@ function startSite() {
           + `<p id="result">Logged in as ${escapeHtml(form.get('username') ?? '')} with ${escapeHtml(form.get('password') ?? '')}</p>`
           + '<p><a id="again" href="/">Back to the form</a></p></body>');
       });
+      return;
+    }
+    // Solid-colour pages: the viewer's frames show which one it draws (see centrePixel).
+    const solid = { '/red': '#ff0000', '/blue': '#0000ff' }[req.url];
+    if (solid) {
+      res.setHeader('content-type', 'text/html; charset=utf-8');
+      res.end(`<!doctype html><title>${req.url.slice(1)}</title><body style="margin:0;background:${solid};height:100vh"></body>`);
       return;
     }
     if (req.url === '/' || req.url === '/index.html') {
@@ -229,6 +238,57 @@ code = os.waitstatus_to_exitcode(status)
 sys.exit(code if code >= 0 else 128 - code)
 `;
 
+// The RGB of a PNG's centre pixel (8-bit RGB or RGBA, non-interlaced: what Chrome's screencast
+// sends). Enough of a decoder to tell which page a frame shows.
+function centrePixel(png) {
+  assert(png.subarray(1, 4).toString() === 'PNG', 'frame is not a PNG');
+  let off = 8;
+  let w; let h; let depth; let ctype;
+  const idat = [];
+  while (off < png.length) {
+    const len = png.readUInt32BE(off);
+    const type = png.toString('latin1', off + 4, off + 8);
+    const data = png.subarray(off + 8, off + 8 + len);
+    if (type === 'IHDR') { w = data.readUInt32BE(0); h = data.readUInt32BE(4); depth = data[8]; ctype = data[9]; assert(data[12] === 0, 'interlaced PNG'); }
+    if (type === 'IDAT') idat.push(data);
+    if (type === 'IEND') break;
+    off += 12 + len;
+  }
+  assert(depth === 8 && (ctype === 2 || ctype === 6), `unsupported PNG (depth ${depth}, colour type ${ctype})`);
+  const bpp = ctype === 6 ? 4 : 3;
+  const raw = zlib.inflateSync(Buffer.concat(idat));
+  const stride = w * bpp;
+  const cy = Math.floor(h / 2);
+  let prev = Buffer.alloc(stride);
+  let row;
+  for (let y = 0; y <= cy; y++) {
+    const f = raw[y * (stride + 1)];
+    const line = raw.subarray(y * (stride + 1) + 1, (y + 1) * (stride + 1));
+    row = Buffer.alloc(stride);
+    for (let i = 0; i < stride; i++) {
+      const a = i >= bpp ? row[i - bpp] : 0;
+      const b = prev[i];
+      const c = i >= bpp ? prev[i - bpp] : 0;
+      let pred = 0;
+      if (f === 1) pred = a;
+      else if (f === 2) pred = b;
+      else if (f === 3) pred = (a + b) >> 1;
+      else if (f === 4) { const p0 = a + b - c; const pa = Math.abs(p0 - a); const pb = Math.abs(p0 - b); const pc = Math.abs(p0 - c); pred = pa <= pb && pa <= pc ? a : pb <= pc ? b : c; }
+      row[i] = (line[i] + pred) & 0xff;
+    }
+    prev = row;
+  }
+  const x = Math.floor(w / 2) * bpp;
+  return [row[x], row[x + 1], row[x + 2]];
+}
+const isColour = (rgb, want) => rgb.every((v, i) => Math.abs(v - want[i]) <= 8);
+
+// The status row as last drawn (the viewer redraws it after every frame).
+const statusRow = (v) => {
+  const all = [...v.tail.matchAll(new RegExp(`\\x1b\\[${ROWS};1H\\x1b\\[2K([^\\x1b]*)`, 'g'))];
+  return all.at(-1)?.[1] ?? '';
+};
+
 function startViewer(env) {
   const child = spawn('python3', ['-I', '-c', PTY_RELAY, String(COLS), String(ROWS), NODE, BIN, 'view', '--agent', AGENT],
     { env, stdio: ['pipe', 'pipe', 'pipe'], cwd: ROOT });
@@ -241,6 +301,10 @@ function startViewer(env) {
     bytes: 0,
     frames: 0,
     place: null, // {cols, rows} of the last image drawn
+    images: 0, // complete images received
+    lastPng: null, // the last complete image, decoded from its Kitty chunks
+    apc: '', // output not yet parsed for Kitty image chunks
+    payload: null, // base64 of the image being received
     queries: [],
     stderr: '',
     exited: new Promise((r) => child.once('exit', (code, signal) => r({ code, signal }))),
@@ -250,7 +314,8 @@ function startViewer(env) {
   child.stderr.on('data', (d) => { v.stderr += d; });
   child.stdout.on('data', (chunk) => {
     v.bytes += chunk.length;
-    const full = v.tail + decoder.write(chunk);
+    const text = decoder.write(chunk);
+    const full = v.tail + text;
     // Each pattern resumes after its last match, or 48 chars back (a sequence split across
     // chunks), so nothing is counted twice and nothing split is missed.
     let replies = '';
@@ -268,6 +333,25 @@ function startViewer(env) {
       v.place = { cols: Number(m[1]), rows: Number(m[2]) };
       pEnd = PLACE.lastIndex;
     }
+    // Whole images, from the Kitty chunks (a=T starts one, m=0 ends it).
+    v.apc += text;
+    const APC = /\x1b_G([^;\x1b]*);?([^\x1b]*)\x1b\\/g;
+    let aEnd = 0;
+    for (let m; (m = APC.exec(v.apc));) {
+      aEnd = APC.lastIndex;
+      const keys = m[1];
+      if (keys.startsWith('a=T,f=100')) v.payload = '';
+      else if (v.payload === null || !/^m=[01]$/.test(keys)) continue;
+      v.payload += m[2];
+      if (/(^|,)m=0$/.test(keys)) {
+        v.lastPng = Buffer.from(v.payload, 'base64');
+        v.images++;
+        v.payload = null;
+      }
+    }
+    // Keep only what may be the start of an unfinished chunk (an ESC split off the end, too).
+    const lastEsc = v.apc.lastIndexOf('\x1b_G');
+    v.apc = v.apc.slice(lastEsc >= aEnd ? lastEsc : Math.max(aEnd, v.apc.length - 2));
     if (replies) child.stdin.write(replies);
     const cut = Math.max(0, full.length - 65536);
     v.tail = full.slice(cut);
@@ -299,7 +383,7 @@ const HINTS_OVERLAY = '__termbrowse_hints'; // src/pageops.js OVERLAY_ID
 async function main() {
   const tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'termbrowse-e2e-'));
   const configFile = path.join(tmp, 'config.toml');
-  await fs.writeFile(configFile, '[chrome]\nheadless = true\n');
+  await fs.writeFile(configFile, `[chrome]\nheadless = true\n\n[control]\nidle_return = "${IDLE_RETURN_S}s"\n`);
   const env = { ...process.env };
   for (const k of ['HC_TERMINAL_ID', 'KITTY_WINDOW_ID', 'TERM_PROGRAM', 'SSH_CONNECTION', 'TMUX']) delete env[k];
   Object.assign(env, {
@@ -484,6 +568,98 @@ async function main() {
       viewer.write(KITTY.esc);
       await until(async () => (await overlay()) === -1, { timeoutMs: 5000, what: 'Esc to remove the hint overlay' });
       info(`overlay #${HINTS_OVERLAY} had ${labels} label(s); gone after Esc`);
+    });
+
+    // The agent's id for the page at url, from list_pages (chrome-devtools-mcp routes page tools by it).
+    const pageIdFor = async (url) => {
+      const r = await agent.callTool('list_pages');
+      const line = texts(r).join('\n').split('\n').find((l) => l.includes(`(${url})`) || l.endsWith(` ${url}`));
+      const id = Number(/^(\d+): /.exec(line ?? '')?.[1]);
+      assert(Number.isInteger(id), `no page id for ${url} in list_pages: ${texts(r).join(' | ').slice(0, 400)}`);
+      return id;
+    };
+    const redUrl = `${base}/red`;
+    const blueUrl = `${base}/blue`;
+    const RED = [255, 0, 0];
+    const BLUE = [0, 0, 255];
+    const WHITE = [255, 255, 255];
+    const shows = (want) => viewer.lastPng && isColour(centrePixel(viewer.lastPng), want);
+
+    // 9
+    await step(`the f takeover goes idle: control comes back by itself after idle_return (${IDLE_RETURN_S} s); the agent's next call says so`, 20000, async () => {
+      const start = Date.now();
+      await until(async () => !(await readControl(AGENT, p)).held, { timeoutMs: (IDLE_RETURN_S + 4) * 1000, what: 'the idle hand-back' });
+      const c = await readControl(AGENT, p);
+      assert(c.lastTakeover?.how === 'idle', `lastTakeover.how is ${c.lastTakeover?.how}, not idle`);
+      // The next call after the takeover (list_pages, inside pageIdFor) carries the note.
+      const lp = await agent.callTool('list_pages');
+      const note = texts(lp).find((tx) => tx.startsWith(NOTE_PREFIX));
+      assert(note && note.includes('(since your last action).') && note.includes(`control came back automatically after ${IDLE_RETURN_S} s with no input.`),
+        `no idle-return note on the next call: ${JSON.stringify(texts(lp)).slice(-600)}`);
+      info(`note: ${note}`);
+      const r = await agent.callTool('navigate_page', { pageId: await pageIdFor(resultUrl), type: 'url', url: redUrl });
+      assert(!r.error && !r.result?.isError, `navigate_page failed: ${JSON.stringify(r.error ?? texts(r))}`);
+      info(`control came back ${Date.now() - start} ms into the step; lastTakeover ${JSON.stringify(c.lastTakeover)}`);
+    });
+
+    // 10
+    await step('agent navigate_page: the viewer follows (status row names the new URL, the drawn image is the new page)', 15000, async () => {
+      await until(() => statusRow(viewer).startsWith(`NORMAL · agent driving · ${redUrl}`) && shows(RED), {
+        timeoutMs: 10000, what: `the status row to name ${redUrl} and the image centre to be red`,
+      });
+      info(`status: ${JSON.stringify(statusRow(viewer))}; centre pixel ${centrePixel(viewer.lastPng)}; images ${viewer.images}`);
+    });
+
+    // 11
+    await step('agent new_page: the viewer switches to the new tab', 15000, async () => {
+      const r = await agent.callTool('new_page', { url: blueUrl });
+      assert(!r.error && !r.result?.isError, `new_page failed: ${JSON.stringify(r.error ?? texts(r))}`);
+      await until(() => statusRow(viewer).startsWith(`NORMAL · agent driving · ${blueUrl}`) && shows(BLUE), {
+        timeoutMs: 10000, what: `the status row to name ${blueUrl} and the image centre to be blue`,
+      });
+      info(`status: ${JSON.stringify(statusRow(viewer))}; centre pixel ${centrePixel(viewer.lastPng)}`);
+    });
+
+    // 12
+    await step(`user clicks and then does nothing: the agent's call waits until idle_return, and the note gives the whole hold`, 25000, async () => {
+      const col = Math.ceil(viewer.place.cols / 2);
+      const row = Math.ceil(viewer.place.rows / 2);
+      viewer.write(`${ESC}[<0;${col};${row}M`);
+      await sleep(60);
+      viewer.write(`${ESC}[<0;${col};${row}m`);
+      await until(async () => (await readControl(AGENT, p)).held, { timeoutMs: 5000, what: 'the click to take control' });
+      const start = Date.now();
+      const r = await agent.callTool('list_pages');
+      const waited = Date.now() - start;
+      const note = texts(r).find((tx) => tx.startsWith(NOTE_PREFIX));
+      assert(note, `no takeover note: ${JSON.stringify(texts(r)).slice(0, 600)}`);
+      assert(waited >= (IDLE_RETURN_S - 1) * 1000, `the call waited only ${waited} ms`);
+      const m = /for (\d+) s \(while you waited, (\d+) s\)\. Their last input was (?:in the first second|(\d+) s in); control came back automatically after (\d+) s with no input\. The page may have changed; it is now at (\S+)\. /.exec(note);
+      assert(m, `note doesn't describe an idle return: ${note}`);
+      const [held, waitedS, active, idle] = m.slice(1, 5).map(Number);
+      assert(held >= IDLE_RETURN_S && held <= IDLE_RETURN_S + 2, `hold ${held} s, expected about ${IDLE_RETURN_S} s`);
+      assert(idle === IDLE_RETURN_S, `idle ${idle} s, expected ${IDLE_RETURN_S} s`);
+      assert(!(active > 1), `last input ${active} s in, expected within the first second`);
+      assert(Math.abs(waitedS * 1000 - waited) <= 1500, `note says waited ${waitedS} s, measured ${waited} ms`);
+      assert(m[5] === blueUrl, `note names ${m[5]}, not ${blueUrl}`);
+      info(`call answered after ${waited} ms`);
+      info(`note: ${note}`);
+    });
+
+    // 13
+    await step('agent closes its new tab and leaves the other on about:blank: the viewer says blank page, not agent driving', 15000, async () => {
+      const r = await agent.callTool('close_page', { pageId: await pageIdFor(blueUrl) });
+      assert(!r.error && !r.result?.isError, `close_page failed: ${JSON.stringify(r.error ?? texts(r))}`);
+      await until(() => statusRow(viewer).startsWith(`NORMAL · agent driving · ${redUrl}`) && shows(RED), {
+        timeoutMs: 10000, what: `the viewer to go back to ${redUrl}`,
+      });
+      const r2 = await agent.callTool('navigate_page', { pageId: await pageIdFor(redUrl), type: 'url', url: 'about:blank' });
+      assert(!r2.error && !r2.result?.isError, `navigate_page failed: ${JSON.stringify(r2.error ?? texts(r2))}`);
+      await until(() => statusRow(viewer).startsWith('NORMAL · blank page · waiting for the agent') && shows(WHITE), {
+        timeoutMs: 10000, what: 'the `NORMAL · blank page · waiting for the agent` status row over a white image',
+      });
+      const rows = await termbrowseJson(['agents', '--json'], env);
+      info(`status: ${JSON.stringify(statusRow(viewer))}; agents: ${rows.map((e) => `${e.agentId} ${e.url}`).join(', ')}`);
     });
 
     // 9
