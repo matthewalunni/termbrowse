@@ -20,7 +20,7 @@ import { agentProfile, pruneProfiles } from './profiles.js';
 import { findEntry, upsertEntry, removeEntry } from './registry.js';
 import { listTargets } from './cdp.js';
 import { agentId } from './agent-id.js';
-import { readControl, setAgentBusy } from './control.js';
+import * as controlFile from './control.js';
 
 const require = createRequire(import.meta.url);
 const STOP_GRACE_MS = 2000; // after stdin ends, before SIGTERM
@@ -123,6 +123,7 @@ export async function runMcp(
     mcpBin: bin = mcpBin(),
     stopGraceMs = STOP_GRACE_MS,
     killGraceMs = KILL_GRACE_MS,
+    control: { readControl, setAgentBusy } = controlFile, // injectable for tests
   } = {},
 ) {
   const id = agentId(env);
@@ -156,9 +157,11 @@ export async function runMcp(
   const setBusy = (busy) =>
     (busyChain = busyChain.then(() => setAgentBusy(id, busy, p)).catch((err) => log(`could not update the control file: ${err.message}`)));
 
-  async function currentUrl() {
+  // The page the agent is on now (Chrome lists the most recently active tab first), else where
+  // the user left it.
+  async function noteUrl(takeover) {
     const targets = await listTargets(port).catch(() => []);
-    return targets.find((t) => t.type === 'page')?.url ?? 'an unknown page';
+    return targets.find((t) => t.type === 'page')?.url ?? takeover.url ?? 'an unknown page';
   }
 
   // The note for a tools/call response, if a takeover ended since the last one reported.
@@ -174,7 +177,7 @@ export async function runMcp(
     if (c.takeovers <= reported || !c.lastTakeover) return null;
     reported = c.takeovers;
     const t = c.lastTakeover;
-    return takeoverNote({ durationMs: t.until - t.since, waited, url: t.url ?? (await currentUrl()) });
+    return takeoverNote({ durationMs: t.until - t.since, waited, url: await noteUrl(t) });
   }
 
   async function announce(c) {

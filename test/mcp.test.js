@@ -359,6 +359,8 @@ test('appendNote: one text item on a result; error.data.note on an error', () =>
 
 // The viewer's side of a takeover, from this (live) test process.
 const take = (agent, url = 'https://x/') => takeControl(agent, { viewerPid: process.pid, url, idleReturnMs: 60_000 }, p);
+// The page the agent is on now: what the note names.
+const pageUrl = async (agent) => (await listTargets((await findEntry(agent, p)).port)).find((t) => t.type === 'page').url;
 const noReplyFor = async (w, id, ms) => { await sleep(ms); return !w.lines.some((m) => m.id === id); };
 
 test('a tools/call waits while the user holds control; pings pass; the note comes after release', { skip, timeout: 120_000 }, async () => {
@@ -382,7 +384,10 @@ test('a tools/call waits while the user holds control; pings pass; the note come
   assert.ok(!r.error && !r.result.isError, JSON.stringify(r));
   const n = notes(r);
   assert.equal(n.length, 1, JSON.stringify(r));
-  assert.match(n[0], /^Note from termbrowse: the user took control of this browser for [12] s \(while you waited\)\. The page may have changed; it is now at https:\/\/x\/after\. Re-check the page \(e\.g\. take a snapshot\) before continuing\.$/);
+  const here = await pageUrl('test-w');
+  assert.notEqual(here, 'https://x/after');
+  assert.match(n[0], /^Note from termbrowse: the user took control of this browser for [12] s \(while you waited\)\. The page may have changed; it is now at /);
+  assert.ok(n[0].endsWith(`it is now at ${here}. Re-check the page (e.g. take a snapshot) before continuing.`), n[0]);
   assert.deepEqual(notes(await w.call('list_pages')), [], 'a takeover is reported once');
   w.child.stdin.end();
   assert.equal(await w.exit, 0);
@@ -407,7 +412,8 @@ test('stale control from a dead viewer pid does not block', { skip, timeout: 120
   assert.ok(!r.error && !r.result.isError, JSON.stringify(r));
   const n = notes(r);
   assert.equal(n.length, 1, JSON.stringify(r));
-  assert.match(n[0], / for 4 s \(since your last action\)\. .* now at https:\/\/dead\/\. /);
+  assert.match(n[0], / for 4 s \(since your last action\)\. /);
+  assert.ok(n[0].includes(`now at ${await pageUrl('test-s')}. `), n[0]);
   w.child.stdin.end();
   assert.equal(await w.exit, 0);
 });
@@ -429,7 +435,8 @@ test('a takeover with no call pending is reported on the next result, once; an o
   const r = await w.call('list_pages');
   const n = notes(r);
   assert.equal(n.length, 1, JSON.stringify(r));
-  assert.match(n[0], / for 1 s \(since your last action\)\. .* now at https:\/\/y\/\. /);
+  assert.match(n[0], / for 1 s \(since your last action\)\. /);
+  assert.ok(n[0].includes(`now at ${await pageUrl('test-t')}. `), n[0]);
   assert.deepEqual(notes(await w.call('list_pages')), []);
   w.child.stdin.end();
   assert.equal(await w.exit, 0);
@@ -509,4 +516,83 @@ test('cancelling an in-flight call clears agentBusySince', { skip, timeout: 120_
   assert.equal((await readControl('test-z', p)).agentBusySince, null);
   w.child.stdin.end();
   assert.equal(await w.exit, 0);
+});
+
+// In-process wrapper against a stub chrome-devtools-mcp that answers every request with "ok",
+// with the agent's "Chrome" already in the registry (so none is launched) on `port`. body(call)
+// runs the test; the wrapper is always shut down after it, pass or fail.
+async function withStub(agent, port, control, body) {
+  const { runMcp } = await import('../src/mcp.js');
+  const { PassThrough } = await import('node:stream');
+  const { upsertEntry, removeEntry } = await import('../src/registry.js');
+  const script = join(tmp, 'echo-mcp.mjs');
+  await writeFile(script, `import { createInterface } from 'node:readline';
+createInterface({ input: process.stdin }).on('line', (l) => {
+  const m = JSON.parse(l);
+  if (m.id !== undefined) process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id: m.id, result: { content: [{ type: 'text', text: 'ok' }] } }) + '\\n');
+});
+`);
+  const stand = spawn('sleep', ['60'], { stdio: 'ignore' }); // a live pid for the registry entry
+  await upsertEntry({ agentId: agent, pid: stand.pid, port, profileDir: '/x', kind: 'agent' }, p);
+  const stdin = new PassThrough();
+  const stdout = new PassThrough();
+  let buf = '';
+  stdout.on('data', (d) => { buf += d; });
+  const done = runMcp([], { stdin, stdout, env: { ...env, TERMBROWSE_AGENT: agent }, mcpBin: script, stopGraceMs: 100, killGraceMs: 300, control });
+  const call = async (id) => {
+    stdin.write(`${JSON.stringify({ jsonrpc: '2.0', id, method: 'tools/call', params: { name: 'list_pages', arguments: {} } })}\n`);
+    const line = await until(() => buf.split('\n').find((l) => l && JSON.parse(l).id === id), 5000);
+    assert.ok(line, `no reply to ${id}`);
+    return JSON.parse(line);
+  };
+  try {
+    await body(call);
+  } finally {
+    stdin.end();
+    const code = await done;
+    stand.kill();
+    await removeEntry(agent, p);
+    assert.equal(code, 0);
+  }
+}
+
+test('a control file that cannot be read counts as released: the call goes through at once', { timeout: 30_000 }, async () => {
+  const failing = { readControl: async () => { throw new Error('registry lock busy'); }, setAgentBusy: async () => {} };
+  const { freePort } = await import('../src/chrome.js');
+  await withStub('test-rf', await freePort(), failing, async (call) => {
+    const t0 = Date.now();
+    const r = await call(1);
+    assert.ok(Date.now() - t0 < 1000, `waited ${Date.now() - t0} ms`);
+    assert.deepEqual(r.result.content, [{ type: 'text', text: 'ok' }]);
+  });
+});
+
+test('the note gives the page the agent is on now, else where the user left it', { timeout: 30_000 }, async () => {
+  const { startFakeCdp } = await import('./helpers/fake-cdp.js');
+  const { freePort } = await import('../src/chrome.js');
+  // Baseline read: no takeovers; every later read: one, ended, left at https://left/.
+  const fakeControl = () => {
+    let reads = 0;
+    return {
+      readControl: async () => (reads++ === 0
+        ? { held: false, takeovers: 0, lastTakeover: null, agentBusySince: null }
+        : { held: false, takeovers: 1, lastTakeover: { since: 0, until: 5000, url: 'https://left/' }, agentBusySince: null }),
+      setAgentBusy: async () => {},
+    };
+  };
+  const fake = await startFakeCdp(); // lists https://example.com/
+  try {
+    await withStub('test-nu', fake.port, fakeControl(), async (call) => {
+      const n = notes(await call(1));
+      assert.equal(n.length, 1);
+      assert.match(n[0], /it is now at https:\/\/example\.com\/\. /);
+    });
+  } finally {
+    await fake.close();
+  }
+  await withStub('test-nu2', await freePort(), fakeControl(), async (call) => { // nothing answers /json/list
+    const n = notes(await call(1));
+    assert.equal(n.length, 1);
+    assert.match(n[0], /it is now at https:\/\/left\/\. /);
+  });
 });
