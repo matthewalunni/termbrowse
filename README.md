@@ -153,6 +153,7 @@ on_launch = ""              # shell command run after a termbrowse Chrome starts
 [view]
 fill_pane = true             # pages opened with `termbrowse <url>` (and `view --port` on such a browser) fill the pane
 fill_pane_for_agents = false # agent browsers fill the pane too (`view --agent`, `view --port` on an agent's port)
+interactive = true           # false: watch only, like --watch (no input reaches the page)
 
 [keys]                       # reserved keys of the viewer, see "Using the page"
 prefix = "ctrl-]"
@@ -160,7 +161,7 @@ give_back = "g"
 quit = "q"
 
 [control]                    # taking over an agent's browser, durations like "90s", "5m", "2h"
-idle_return = "5m"           # hand the browser back after this long without input
+idle_return = "5m"           # hand the browser back after this long without input (more than 0, at most 24 days)
 max_wait = "10m"             # the longest an agent's tool call waits while you hold control
 ```
 
@@ -195,7 +196,13 @@ The viewer forwards what you do in the pane to the page, in any terminal that dr
 - **Keys**: letters, digits, punctuation, Enter, Tab, Backspace, Escape, arrows, Home, End, PageUp, PageDown, Insert, Delete and F1 to F12, with Ctrl, Alt and Shift. Terminals without the Kitty keyboard protocol work for plain typing, Enter, Backspace and arrows; modified keys are more reliable in Kitty, Ghostty and Herdr. Accented letters, emoji and other non-ASCII text are inserted as text.
 - **Paste**: bracketed paste goes into the focused field in one piece.
 
-Before your first input, `q` and Ctrl-C quit the viewer, as before. After it they go to the page (so you can type a `q` into a search box), and the viewer is left with the reserved keys, or with a signal (SIGINT, SIGTERM, SIGHUP, e.g. closing the pane).
+Before your first input, `q` and Ctrl-C quit the viewer, as before. After it they go to the page (so you can type a `q` into a search box), and the viewer is left with the reserved keys, or with a signal (SIGINT, SIGTERM, SIGHUP, e.g. closing the pane). Once you hand an agent's browser back, the viewer is watching again and `q` and Ctrl-C quit again. The status row always ends with how to quit, e.g. `· Ctrl-] q quit`.
+
+Clicking a pane only to focus it doesn't click the page: in terminals that report focus (Kitty, Ghostty, WezTerm and others), a press within 150 ms of the pane gaining focus is dropped, and scrolling over a pane that doesn't have focus is ignored. Terminals that don't report focus behave as if always focused.
+
+**Watch only**: `termbrowse <url> --watch` and `termbrowse view … --watch` draw the page without sending it any input, so they never take control of an agent's browser; `q` and Ctrl-C quit. Set `interactive = false` under `[view]` to make that the default.
+
+On macOS, editing shortcuts in the page (select all, deleting a word, copy and paste with the keyboard) may not work: Chrome on a Mac performs them as editing commands, not from the key alone, and termbrowse doesn't send those commands yet. Typing, Enter, Backspace and arrows work. Linux is not affected.
 
 ### Reserved keys
 
@@ -208,16 +215,16 @@ Press the **prefix** key, then one more key within 2 seconds. The status row sho
 | prefix, prefix | send the prefix key itself to the page |
 | prefix, anything else | cancels the prefix |
 
-The defaults are `ctrl-]`, `g` and `q`. Rebind them in `[keys]`: a key is a single character or a name (`escape`, `tab`, `enter`, `space`, `f1` to `f12`), optionally with `ctrl-` and `alt-` in front, e.g. `prefix = "ctrl-b"` or `give_back = "alt-g"`. A key that doesn't parse stops termbrowse with an error naming the file and the key.
+The defaults are `ctrl-]`, `g` and `q`. A letter matches with or without Shift or Caps Lock (`g` also matches `G`), unless you configure a capital letter, which then matches only itself. Rebind them in `[keys]`: a key is a single character or a name (`escape`, `tab`, `enter`, `space`, `f1` to `f12`), optionally with `ctrl-` and `alt-` in front, e.g. `prefix = "ctrl-b"` or `give_back = "alt-g"`. A key that doesn't parse stops termbrowse with an error naming the file and the key.
 
 ### Taking over from an agent
 
-Control applies to agent browsers only (`view --agent ID`, or `view --port` on an agent's port). A browser started by `termbrowse <url>` is always yours and never has a hand-back. The first mouse press, key press, paste or scroll in the pane takes control. Then:
+Control applies to agent browsers only (`view --agent ID`, or `view --port` on an agent's port). A browser started by `termbrowse <url>` is always yours and never has a hand-back. Run the viewer on the host where the agent runs: termbrowse tells an agent's browser from others by its own registry there. A `view --port` through an ssh tunnel from another machine acts as a standalone browser: your input reaches the page, but the agent's calls don't wait for you and there is no hand-back. The first mouse press, key press, paste or scroll in the pane takes control. Then:
 
-- The status row reads `you have control · Ctrl-] g to hand back`, with the keys from your config. While the agent holds the browser, it reads `agent · <url> · <fps>`. If the agent was in the middle of an action when you took control, the row says `agent was acting…` for about 2 seconds.
+- The status row reads `you have control · Ctrl-] g to hand back`, with the keys from your config. While the agent holds the browser, it reads `agent · <url> · <fps> · Ctrl-] q quit`. If the agent was in the middle of an action when you took control, the row says `agent was acting…` for about 2 seconds.
 - The agent's browser tool calls wait: `termbrowse mcp` holds each call until you hand the browser back. Nothing is dropped, and calls that need no browser (the tool list, for example) still answer.
 - You hand the browser back with the prefix and `give_back` keys, by quitting the viewer, or by leaving it idle for `idle_return` (default 5 minutes). If the viewer process dies, the agent notices within about a second.
-- The agent's first result after you hand back carries an extra text item: `Note from termbrowse: the user took control of this browser for <duration> (<while you waited|since your last action>). The page may have changed; it is now at <url>. Re-check the page (e.g. take a snapshot) before continuing.`
+- The agent's next browser tool result after you hand back carries an extra text item: `Note from termbrowse: the user took control of this browser for <duration> (<while you waited|since your last action>). The page may have changed; it is now at <url>. Re-check the page (e.g. take a snapshot) before continuing.` The URL is the page the agent's browser is on when the note is written; the duration ends at your last input (an idle hand-back doesn't count the idle wait).
 - If you keep control for longer than `max_wait` (default 10 minutes) while a call waits, that call fails with the MCP error `termbrowse: the user has control of the browser; try again later` (code -32000), and the agent can try again.
 - If termbrowse can't write the control file, the viewer says `couldn't take control: <reason>` and the agent isn't blocked. Your input still reaches the page.
 
