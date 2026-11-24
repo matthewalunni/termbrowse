@@ -309,7 +309,7 @@ Herdr draws Kitty graphics but doesn't answer the query, which is why step 1 exi
 | Terminal | Status |
 | --- | --- |
 | Herdr (macOS) | watching confirmed by eye (2026-11-23): sharp, undistorted, follows new tabs, fills the pane, scrolls smoothly without flicker. Clicking and typing in the pane: expected to work; not yet confirmed |
-| Herdr terminal on a remote Linux machine | the viewer runs and writes frames (31 fps measured on `dev`); not yet confirmed that the image shows up on the Mac; clicking and typing over ssh: expected to work; not yet confirmed |
+| Herdr terminal on a remote Linux machine | the viewer runs and writes frames (31 fps measured on a headless Debian box); not yet confirmed that the image shows up on the Mac; clicking and typing over ssh: expected to work; not yet confirmed |
 | Kitty, Ghostty | expected to work; not yet confirmed (including clicking and typing) |
 | WezTerm | Kitty graphics are off by default; with `enable_kitty_graphics = true` it answers the query (not tested) |
 | macOS Terminal.app, iTerm2 | not supported (no Kitty graphics); the viewer refuses to start |
@@ -333,7 +333,7 @@ The image is drawn at the pane's real pixel size (1×, never Retina 2×) from PN
 
 ## Linux
 
-termbrowse was checked on a headless Debian 13 (trixie) x86_64 machine (Herdr's `dev`):
+termbrowse was checked on a headless Debian 13 (trixie) x86_64 machine:
 
 - Node: Debian's `/usr/bin/node` is 20.19.2, which is too old. `doctor` reports `Node: fail (20.19.2; termbrowse needs 22 or newer)`. Use Node 22 or newer from nvm, NodeSource or similar. The check used Node 26.13.1 from nvm.
 - Chrome libraries: a minimal Debian lacks the shared libraries Chrome needs. `doctor` lists the missing ones from `ldd`, followed by the `sudo apt install` line for the packages that provide them (Debian 13 / Ubuntu 24.04 names; any library it has no package for is named as-is). On Debian 13 they were:
