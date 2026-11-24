@@ -491,3 +491,22 @@ test('agentBusySince is set while a call is in flight and cleared by its respons
   w.child.stdin.end();
   assert.equal(await w.exit, 0);
 });
+
+test('cancelling an in-flight call clears agentBusySince', { skip, timeout: 120_000 }, async () => {
+  const w = new Wrapper('test-z');
+  await w.init();
+  const pages = await w.call('list_pages');
+  const pageId = Number(/^(\d+):/m.exec(text(pages))?.[1]);
+  assert.ok(pageId, text(pages));
+  w.child.stdin.write(`${JSON.stringify({ jsonrpc: '2.0', id: 700, method: 'tools/call', params: { name: 'evaluate_script', arguments: { pageId, function: '() => new Promise((r) => setTimeout(() => r(1), 3000))' } } })}\n`);
+  assert.ok(await until(async () => typeof (await readControl('test-z', p)).agentBusySince === 'number', 3000), 'never busy');
+  w.notify('notifications/cancelled', { requestId: 700, reason: 'client timeout' });
+  assert.ok(await until(async () => (await readControl('test-z', p)).agentBusySince === null, 2000), 'still busy after the cancel');
+  // the next call sets and clears it again
+  const slow = w.call('evaluate_script', { pageId, function: '() => new Promise((r) => setTimeout(() => r(2), 1500))' });
+  assert.ok(await until(async () => typeof (await readControl('test-z', p)).agentBusySince === 'number', 3000), 'not busy for the next call');
+  assert.ok(!(await slow).result.isError);
+  assert.equal((await readControl('test-z', p)).agentBusySince, null);
+  w.child.stdin.end();
+  assert.equal(await w.exit, 0);
+});

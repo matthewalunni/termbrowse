@@ -280,6 +280,16 @@ export async function runMcp(
     }, stopGraceMs);
   }
 
+  // Writes a line to the child. A cancellation of a call already forwarded ends it for us too:
+  // the child sends no response for a request it cancelled, so the busy flag is cleared here.
+  function toChild(line, msg) {
+    for (const m of Array.isArray(msg) ? msg : [msg]) {
+      if (m?.method !== 'notifications/cancelled' || !inFlight.delete(m.params?.requestId)) continue;
+      if (!inFlight.size) setBusy(false);
+    }
+    child.stdin.write(line);
+  }
+
   const callIds = (msg) => (Array.isArray(msg) ? msg : [msg]).filter((m) => m?.method === 'tools/call' && m.id !== undefined).map((m) => m.id);
 
   // A line that need not wait behind a held call. A cancellation of a call that hasn't been
@@ -301,7 +311,7 @@ export async function runMcp(
         return;
       }
     }
-    child.stdin.write(line);
+    toChild(line, msg);
   }
 
   // Waits while the user holds control. Resolves 'free' (never held), 'waited' (released),
@@ -377,7 +387,7 @@ export async function runMcp(
         if (ids.length && !inFlight.size) await setBusy(true);
         for (const cid of ids) inFlight.set(cid, waited);
       }
-      child.stdin.write(backgroundTabs && msg !== undefined ? backgroundNewPages(line) : line);
+      toChild(backgroundTabs && msg !== undefined ? backgroundNewPages(line) : line, msg);
     }
   }
   function pump() {
