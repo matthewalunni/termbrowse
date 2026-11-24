@@ -72,10 +72,11 @@ const formatDuration = (ms) => {
   return s < 60 ? `${s} s` : `${Math.round(s / 60)} min`;
 };
 
-export const takeoverNote = ({ durationMs, waited, url }) =>
+export const takeoverNote = ({ durationMs, waited, url, tabsChanged }) =>
   `Note from termbrowse: the user took control of this browser for ${formatDuration(durationMs)} `
   + `(${waited ? 'while you waited' : 'since your last action'}). The page may have changed; it is now at ${url}. `
-  + 'Re-check the page (e.g. take a snapshot) before continuing.';
+  + 'Re-check the page (e.g. take a snapshot) before continuing.'
+  + (tabsChanged ? ' The user changed tabs; call list_pages and select_page before continuing.' : '');
 
 // Adds the note to one response object: a text item on result.content, or, on a JSON-RPC error
 // (which has no content), error.data.note with the error otherwise unchanged.
@@ -175,9 +176,11 @@ export async function runMcp(
     if (c.held) return null; // the user took control mid-call: told once it ends
     if (c.takeovers < reported) reported = 0; // the file was removed and started over
     if (c.takeovers <= reported || !c.lastTakeover) return null;
+    // A takeover since the last report changed tabs, even if a later one didn't.
+    const tabsChanged = !!c.lastTakeover.tabsChanged || (c.tabsChangedAt ?? 0) > reported;
     reported = c.takeovers;
     const t = c.lastTakeover;
-    return takeoverNote({ durationMs: t.until - t.since, waited, url: await noteUrl(t) });
+    return takeoverNote({ durationMs: t.until - t.since, waited, url: await noteUrl(t), tabsChanged });
   }
 
   async function announce(c) {

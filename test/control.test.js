@@ -47,9 +47,42 @@ test('release records lastTakeover and keeps takeovers; a second take+release ma
   assert.equal(c.lastTakeover.url, 'https://c.test/');
 });
 
+test('release records tabsChanged on the takeover (false unless set); a new take starts clean', async () => {
+  const p = await tmpPaths();
+  await take(p);
+  await releaseControl('a1', { url: 'https://b.test/', tabsChanged: true }, p);
+  assert.equal((await readControl('a1', p)).lastTakeover.tabsChanged, true);
+  await take(p);
+  await releaseControl('a1', { url: 'https://c.test/' }, p);
+  assert.equal((await readControl('a1', p)).lastTakeover.tabsChanged, false);
+});
+
+test('a tab change touched into the record survives an idle (stale) release', async () => {
+  const p = await tmpPaths();
+  await take(p, { idleReturnMs: 50 });
+  await touch(p, { idleReturnMs: 50, tabsChanged: true });
+  await sleep(80);
+  const c = await readControl('a1', p);
+  assert.equal(c.held, false);
+  assert.equal(c.lastTakeover.tabsChanged, true);
+});
+
+test('tabsChangedAt keeps the number of the last takeover that changed tabs', async () => {
+  const p = await tmpPaths();
+  await take(p);
+  await releaseControl('a1', { url: 'https://b.test/', tabsChanged: true }, p);
+  assert.equal((await readControl('a1', p)).tabsChangedAt, 1);
+  await take(p);
+  await releaseControl('a1', { url: 'https://c.test/' }, p);
+  const c = await readControl('a1', p);
+  assert.equal(c.takeovers, 2);
+  assert.equal(c.lastTakeover.tabsChanged, false);
+  assert.equal(c.tabsChangedAt, 1, 'a later takeover without tab changes keeps it');
+});
+
 test('no file reads as not held', async () => {
   const c = await readControl('nobody', await tmpPaths());
-  assert.deepEqual(c, { held: false, takeovers: 0, lastTakeover: null, agentBusySince: null });
+  assert.deepEqual(c, { held: false, takeovers: 0, lastTakeover: null, agentBusySince: null, tabsChangedAt: 0 });
 });
 
 test('dead viewer pid is released', async () => {
@@ -77,10 +110,18 @@ test('idle past idleReturnMs is released, until = lastInput', async () => {
 test('touchControl keeps a held control from going idle', async () => {
   const p = await tmpPaths();
   await take(p, { idleReturnMs: 150 });
-  await sleep(100);
+  const raw = async () => JSON.parse(await fs.readFile(controlPath('a1', p), 'utf8'));
+  const { since } = await raw();
+  await sleep(20);
   await touch(p);
-  await sleep(100);
-  assert.equal((await readControl('a1', p)).held, true);
+  const { lastInput } = await raw();
+  assert.ok(lastInput > since, 'touch moved lastInput');
+  // Read at a fixed clock (not the wall clock, which a loaded machine can push past the limit):
+  // idle by the take alone, not by the touch.
+  const at = lastInput + 140;
+  assert.ok(at - since > 150);
+  assert.equal((await readControl('a1', p, at)).held, true);
+  assert.equal((await readControl('a1', p, lastInput + 151)).held, false, 'idle 150 ms after the touch');
 });
 
 test('touchControl retakes a control that was released under the holder (idle or dead pid read)', async () => {

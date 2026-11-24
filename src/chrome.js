@@ -293,12 +293,37 @@ export async function launchChrome({
       child.kill(sig);
     }
   };
+  // Helpers (GPU, network, renderers) can outlive the main process by a moment and still write to
+  // the profile, so kill() returns only once the group is gone and a caller can delete the profile.
+  // (The group id can't be reused while any member lives. No groups on Windows.)
+  const groupAlive = () => {
+    if (process.platform === 'win32') return false;
+    try {
+      process.kill(-child.pid, 0);
+      return true;
+    } catch {
+      return false;
+    }
+  };
+  const groupGone = async (ms) => {
+    const end = Date.now() + ms;
+    while (groupAlive()) {
+      if (Date.now() > end) return false;
+      await sleep(25);
+    }
+    return true;
+  };
   const kill = async () => {
     if (child.pid === undefined || child.exitCode !== null || child.signalCode !== null) return;
+    const start = Date.now();
     signal('SIGTERM');
     const timer = setTimeout(() => signal('SIGKILL'), killGraceMs);
     await exited;
     clearTimeout(timer);
+    if (!(await groupGone(Math.max(0, killGraceMs - (Date.now() - start))))) {
+      signal('SIGKILL');
+      await groupGone(1000);
+    }
   };
 
   const stopWaiting = new AbortController();

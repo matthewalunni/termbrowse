@@ -4,10 +4,11 @@ import { fit, fillPlace, screencastSize, saneSize, cellToPage } from './layout.j
 import { listTargets, browserVersion, pickTarget, CdpSession } from './cdp.js';
 import { termSize, detectKitty, knownKittyTerminal } from './tty.js';
 import { InputParser } from './input.js';
-import { toKeyEvents, isPrintable, matchesSpec } from './keymap.js';
-import { parseKeySpec } from './config.js';
+import { toKeyEvents, isPrintable } from './keymap.js';
 import { paths } from './paths.js';
 import { takeControl, touchControl, releaseControl, readControl } from './control.js';
+import { createModes } from './modes.js';
+import * as ops from './pageops.js';
 
 const ESC = '\x1b';
 export const NO_KITTY = "termbrowse: this terminal doesn't support Kitty graphics (try Kitty, Ghostty, WezTerm or Herdr)\n";
@@ -50,7 +51,6 @@ const RESIZE_DEBOUNCE_MS = 150;
 // popped before leaving it.
 export const MODES_ON = `${ESC}[?1003h${ESC}[?1006h${ESC}[?2004h${ESC}[>29u${ESC}[?1004h${ESC}[?u`;
 export const MODES_OFF = `${ESC}[<u${ESC}[?1004l${ESC}[?2004l${ESC}[?1003l${ESC}[?1006l`;
-const DEFAULT_KEYS = { prefix: parseKeySpec('ctrl-]'), giveBack: parseKeySpec('g'), quit: parseKeySpec('q') };
 const FOCUS_CLICK_MS = 150; // a press this soon after the terminal gains focus only focused the pane
 
 // How long a lone ESC waits before it counts as the Escape key rather than the start of a
@@ -59,13 +59,60 @@ const FOCUS_CLICK_MS = 150; // a press this soon after the terminal gains focus 
 export function escFlushMs({ kittyKeyboard = false, env = {} } = {}) {
   return kittyKeyboard || env.SSH_CONNECTION ? 300 : 50;
 }
-const PREFIX_MS = 2000;
 const CLICK_MS = 400; // double/triple click window
 const HOVER_MS = 1000 / 30; // at most 30 pointer moves a second
 const TOUCH_MS = 1000; // refresh the control file's lastInput at most once a second
 const BUSY_NOTE_MS = 2000;
 const FAIL_NOTE_MS = 3000;
 const BUTTON_BITS = { left: 1, right: 2, middle: 4 };
+const MATCH_NOTE_MS = 3000;
+const GATE_MS = 2500; // longest a page check / hint pick / tab op holds key events
+const PAGE_CLEANUP_MS = 2100; // hint labels / find highlights on exit (pageops gives up after 2 s)
+
+// The vim-mode keys, for the help page (?, :help) and the README. The way out comes first, so a
+// short pane still shows it.
+export const KEY_HELP = [
+  [':q', 'quit (Ctrl-C too, in Normal)'],
+  ['Esc', 'Insert → Normal; in Normal, hand control back'],
+  [':done', 'hand control back to the agent'],
+  ['j k / h l', 'scroll down / up / left / right'],
+  ['d u', 'half a page down / up'],
+  ['gg G', 'top / bottom'],
+  ['f F', 'link hints: type a label to click it (F: in a new tab)'],
+  ['gi', 'focus the first text field (Insert)'],
+  ['i', 'Insert: keys go to the page'],
+  ['/ n N', 'find; next / previous match'],
+  ['H L', 'back / forward'],
+  ['r', 'reload'],
+  ['J gT / K gt', 'previous / next tab'],
+  ['t x', 'new tab / close tab'],
+  ['yy', 'copy the URL'],
+  [':o <url>', 'open a URL'],
+  [':esc', 'send Escape to the page'],
+  ['?', 'this help'],
+];
+
+export function helpLines(cols, rows) {
+  const lines = ['termbrowse keys (any key closes this)', ''];
+  for (const [keys, what] of KEY_HELP) lines.push(`  ${keys.padEnd(12)} ${what}`);
+  return lines.slice(0, Math.max(0, rows)).map((l) => l.slice(0, Math.max(0, cols)));
+}
+
+// The Normal status row: the URL shrinks first, then the hints go, never the way out.
+export function normalStatus(lead, url, width) {
+  let parts = [...lead];
+  let hints = ['f links', 'i insert', ':q quit', '? help'];
+  const join = (u) => [...parts, ...(u ? [u] : []), ...hints].join(' · ');
+  if (join(url).length <= width) return join(url);
+  const room = width - join('').length - 3;
+  if (url && room >= 12) return join(`${url.slice(0, room - 1)}…`);
+  for (const drop of ['? help', 'i insert', 'f links']) {
+    if (join('').length <= width) break;
+    hints = hints.filter((h) => h !== drop);
+  }
+  if (join('').length > width) parts = parts.slice(0, 1);
+  return join('').slice(0, width);
+}
 
 // Waits for promise, at most ms; the timer is cleared either way, so it never holds the process open.
 async function within(promise, ms) {
@@ -88,8 +135,7 @@ export async function runViewer({
   onExit,
   onReady,
   fill = false, // lay the page out at the pane's size (Emulation.setDeviceMetricsOverride)
-  interactive = true, // send mouse, keys and paste to the page; false: watch only (q / Ctrl-C quit)
-  keys = DEFAULT_KEYS, // reserved keys (config [keys])
+  interactive = true, // vim-mode keys, mouse and paste; false: watch only (q / Ctrl-C quit)
   // agentId: the agent whose browser this is (control file), null for a standalone browser.
   control: { agentId = null, idleReturnMs = 300_000 } = {},
 }) {
@@ -135,14 +181,11 @@ export async function runViewer({
   // Input state (interactive mode).
   const parser = new InputParser();
   let escTimer = null;
-  let prefixTimer = null; // set while the prefix key is armed
-  let hadInput = false; // q and Ctrl-C quit until the first input (or a hand back); afterwards they go to the page
   let lastInputAt = 0;
   let kittyKeyboard = knownKittyTerminal(env); // a bare ESC never means the Escape key
   let focusKnown = false; // the terminal reports focus (?1004); until it does, assume focused
   let focused = true;
   let focusInAt = -Infinity;
-  let holding = false; // the user holds control of the agent's browser
   let lastTouch = 0;
   let idleTimer = null;
   let confirmed = false; // the control file says the user holds it (status says so only then)
@@ -153,6 +196,20 @@ export async function runViewer({
   let lastMoveAt = 0;
   let pendingMove = null;
   let moveTimer = null;
+  // Vim mode (interactive).
+  let holding = false; // the user holds control of the agent's browser
+  const modes = createModes({ agent: !!agentId, holding: () => holding });
+  let hintsOn = false; // hint labels may be in the page
+  let hintTyped = '';
+  let hintNewTab = false;
+  let hintScroll = null; // the page's scroll offset when the labels were drawn
+  let lastScroll = null; // the scroll offset of the last frame (screencast metadata)
+  let findOn = false; // find highlights may be in the page
+  let helpShown = false;
+  let tabsChanged = false; // the user changed tabs during this takeover
+  let closingTab = null; // the tab id the user is closing (its socket closing is expected)
+  let pageDead = false; // the viewed tab was closed by x and the switch is still on its way
+  let gone = false; // the browser went away: the status row says so
   let controlOps = Promise.resolve(); // control file writes, in order
   const statePaths = agentId ? paths(env) : null;
   const received = []; // {t, size} for frames received in the last second
@@ -165,13 +222,12 @@ export async function runViewer({
     while (drawn.length && now - drawn[0] > 1000) drawn.shift();
   };
 
-  // How to quit, always shown. Watch only: q (and Ctrl-C) quit without the prefix.
-  const quitHint = ` · ${interactive ? `${keys.prefix.label} ${keys.quit.label}` : 'q'} quit`;
+  // Watch only: q (and Ctrl-C) quit.
+  const quitHint = ' · q quit';
   const statusText = (suffix) => {
     const width = Math.max(0, term.cols);
+    if (interactive) return vimStatus(width);
     if (note && note.until > Date.now()) return note.text.slice(0, width);
-    if (prefixTimer) return 'prefix…'.slice(0, width);
-    if (holding && confirmed) return `you have control · ${keys.prefix.label} ${keys.giveBack.label} to hand back`.slice(0, width);
     // The URL shrinks first; past that the rest is cut before the quit hint is.
     const fitted = (row) => (row.length + quitHint.length <= width ? row : row.slice(0, Math.max(0, width - quitHint.length))) + quitHint;
     if (agentId) {
@@ -180,6 +236,25 @@ export async function runViewer({
     }
     const room = Math.max(0, width - suffix.length - quitHint.length - 2);
     return fitted(`${url.slice(0, room)}  ${suffix}`).slice(0, width);
+  };
+  // Interactive: mode, who drives, the way out (see global constraints in the vim-mode plan).
+  const vimStatus = (width) => {
+    if (gone) return 'disconnected'.slice(0, width);
+    if (helpShown) return 'help · any key to close'.slice(0, width);
+    const { mode, line } = modes.state();
+    if (paused && mode !== 'command') return `paused (pane too small or too large) · ${mode === 'insert' ? 'Esc normal' : ':q quit'}`.slice(0, width);
+    if (mode === 'command' || mode === 'find') {
+      const text = `${mode === 'command' ? ':' : '/'}${line}█`;
+      // The hint is cut first; past that, keep the cursor end of the line in view.
+      if (text.length <= width) return `${text} · Esc cancel`.slice(0, width);
+      return text.slice(text.length - width);
+    }
+    if (note && note.until > Date.now()) return note.text.slice(0, width);
+    if (mode === 'hints') return 'f: type a label · Esc cancel'.slice(0, width);
+    const mine = !!agentId && holding && confirmed;
+    if (mode === 'insert') return (mine ? 'INSERT · you have control · Esc normal' : 'INSERT · Esc normal').slice(0, width);
+    if (mine) return `NORMAL · you have control · Esc or :done hand back · ${url}`.slice(0, width);
+    return normalStatus(agentId ? ['NORMAL', 'agent driving'] : ['NORMAL'], url, width);
   };
   const statusSeq = (text) => `${ESC}[${term.rows};1H${ESC}[2K${text}`;
   const setStatus = (suffix, force = false) => {
@@ -233,7 +308,15 @@ export async function runViewer({
       received.length = 0;
       restartScreencast();
     }
-    if (paused || busy) return;
+    if (Number.isFinite(metadata?.scrollOffsetX) && Number.isFinite(metadata?.scrollOffsetY)) {
+      lastScroll = { x: metadata.scrollOffsetX, y: metadata.scrollOffsetY };
+      // The page scrolled under the hint labels: they no longer sit on their elements.
+      if (hintsOn && hintScroll && (hintScroll.x !== lastScroll.x || hintScroll.y !== lastScroll.y)) {
+        cancelHints();
+        showStatus();
+      }
+    }
+    if (paused || busy || helpShown) return;
     let frame;
     let size;
     let fitted;
@@ -267,7 +350,11 @@ export async function runViewer({
     if (method === 'Page.screencastFrame') onFrame(params);
     else if (method === 'Page.frameNavigated' && params?.frame && !params.frame.parentId) {
       url = params.frame.url ?? url;
-      if (!paused && !closing) setStatus(fpsSuffix());
+      // A new document has no labels; a page restored from the back/forward cache may still have
+      // highlights, so they are cleared.
+      if (findOn) clearFindNow();
+      if (hintsOn) cancelHints();
+      if (!paused && !closing) setStatus(fpsSuffix(), true);
     }
   };
 
@@ -276,21 +363,23 @@ export async function runViewer({
     closing = true;
     clearInterval(ticker);
     clearTimeout(resizeTimer);
-    for (const timer of [escTimer, prefixTimer, idleTimer, noteTimer, moveTimer]) clearTimeout(timer);
-    prefixTimer = null;
+    for (const timer of [escTimer, idleTimer, noteTimer, moveTimer, holdTimer]) clearTimeout(timer);
     note = null;
     stdin.removeListener('data', onKey);
     for (const [sig, fn] of sigHandlers) signals.removeListener(sig, fn);
+    // Hint labels and find highlights out of the page (best effort, never more than ~2 s).
+    const cleanup = code === 0 ? leavePage() : Promise.resolve();
     // Hand the agent its browser back first, so it doesn't wait on the rest of the cleanup.
     if (holding) {
       holding = false;
-      release(url);
+      release(url, undefined, tabsChanged);
     }
     // A size query in flight puts raw mode back as it found it when it ends: let it end first.
     await within(resizing, 1000);
     if (code === 0) {
-      await within(Promise.all([stopScreencast(), clearFill()]), 500);
+      await Promise.all([within(Promise.all([stopScreencast(), clearFill()]), 500), within(cleanup, PAGE_CLEANUP_MS)]);
     } else {
+      gone = true;
       setStatus('disconnected', true);
       await Promise.all([clearFill(), new Promise((r) => setTimeout(r, 1000))]);
     }
@@ -325,9 +414,10 @@ export async function runViewer({
   // Make `next` the viewed page: hook it up, drop the old session, start drawing.
   const adopt = async (next, info) => {
     const old = page;
-    if (old !== next) await clearFill();
+    if (old !== next) await Promise.all([clearFill(), within(leavePage(), PAGE_CLEANUP_MS)]);
     if (closing) { if (old !== next) next.close(); return; }
     page = next;
+    pageDead = false;
     target = info;
     url = info.url ?? '';
     attachPage(next);
@@ -342,33 +432,51 @@ export async function runViewer({
     }
   };
 
-  const wsFor = async (targetId) => {
-    let wsUrl;
+  // The tab's socket URL and its URL as listed, if it is.
+  const lookup = async (targetId) => {
+    let t;
     try {
-      wsUrl = (await listTargets(port)).find((t) => t.id === targetId)?.webSocketDebuggerUrl;
+      t = (await listTargets(port)).find((x) => x.id === targetId);
     } catch { /* fall back below */ }
-    return wsUrl ?? `ws://127.0.0.1:${port}/devtools/page/${targetId}`;
+    return { wsUrl: t?.webSocketDebuggerUrl ?? `ws://127.0.0.1:${port}/devtools/page/${targetId}`, url: t?.url };
   };
 
   // New tabs are switched to one at a time, in the order they were created; one that is
   // superseded by a later tab before it is connected is dropped, so the latest one wins.
   let switching = Promise.resolve();
   let latestSwitch = 0;
+  let following = null; // the tab a switch is on its way to (a tab op and discovery may both name it)
   const follow = (targetId, newUrl) => {
+    if (targetId === following) return;
+    markTabsChanged(); // F, or a click that opened a tab, while the user holds control
+    following = targetId;
     const seq = ++latestSwitch;
     switching = switching.then(() => (seq === latestSwitch ? switchTo(targetId, newUrl, seq) : undefined));
   };
 
   const switchTo = async (targetId, newUrl, seq) => {
-    let next;
     try {
-      next = await CdpSession.connect(await wsFor(targetId));
-    } catch {
-      return; // keep the current page
+      if (targetId === target.id) return;
+      let next;
+      let listed;
+      try {
+        listed = await lookup(targetId);
+        next = await CdpSession.connect(listed.wsUrl);
+      } catch {
+        // Keep the current page, unless it is the tab x just closed: then fall back like a
+        // closed tab (another page, or disconnected).
+        if (pageDead) {
+          pageDead = false;
+          onPageClosed();
+        } else if (closingTab === target.id) closingTab = null; // its close, when seen, falls back
+        return;
+      }
+      if (closing || seq !== latestSwitch) { next.close(); return; }
+      // openerId: the tab to go back to when this one closes (the one viewed until now).
+      await adopt(next, { id: targetId, url: newUrl ?? listed.url, openerId: target.id });
+    } finally {
+      if (following === targetId) following = null;
     }
-    if (closing || seq !== latestSwitch) { next.close(); return; }
-    // openerId: the tab to go back to when this one closes (the one viewed until now).
-    await adopt(next, { id: targetId, url: newUrl, openerId: target.id });
   };
 
   // The viewed tab's socket closed. If Chrome is still up, view another tab (the one it was followed from first);
@@ -376,6 +484,12 @@ export async function runViewer({
   const onPageClosed = async () => {
     if (closing) return;
     const closed = target;
+    if (closed.id === closingTab) { // x: the tab op shows the next one
+      closingTab = null;
+      pageDead = true;
+      return;
+    }
+    pageDead = false;
     try {
       if (!(await browserVersion(port))) throw new Error('browser gone');
       const pages = (await listTargets(port)).filter((t) => t.type === 'page' && t.id !== closed.id);
@@ -411,6 +525,7 @@ export async function runViewer({
         repaint = true;
         await applyFill();
         await restartScreencast();
+        if (helpShown) drawHelp();
         setStatus(fpsSuffix(), true);
       }
     });
@@ -443,36 +558,59 @@ export async function runViewer({
 
   // Release in the file, retrying once; a failure is shown (the agent stays blocked until this
   // viewer exits, when its dead pid releases it).
-  const release = (at, until) => queueControl(async () => {
+  const release = (at, until, tabs) => queueControl(async () => {
+    const what = { url: at, until, tabsChanged: tabs };
     try {
-      await releaseControl(agentId, { url: at, until }, statePaths);
+      await releaseControl(agentId, what, statePaths);
     } catch {
       try {
-        await releaseControl(agentId, { url: at, until }, statePaths);
+        await releaseControl(agentId, what, statePaths);
       } catch (err) {
         flash(`couldn't hand back control: ${err.message}`, FAIL_NOTE_MS);
       }
     }
   });
 
+  // --- page cleanup: hint labels and find highlights never stay in the page ---
+  // Each resolves once done or given up (pageops rejects after 2 s); never throws.
+  // A removal already on its way is returned again, so an exit waits for it too.
+  let removingHints = Promise.resolve();
+  let clearingFind = Promise.resolve();
+  const cancelHints = () => {
+    if (modes.state().mode === 'hints') modes.setMode('normal');
+    if (!hintsOn) return removingHints;
+    hintsOn = false;
+    hintTyped = '';
+    removingHints = ops.removeHints(page).catch(() => {});
+    return removingHints;
+  };
+  const clearFindNow = () => {
+    findOn = false;
+    clearingFind = ops.clearFind(page).catch(() => {});
+    return clearingFind;
+  };
+  // Before leaving a page (quit, hand back, another tab): take our marks out of it.
+  const leavePage = () => Promise.all([cancelHints(), findOn ? clearFindNow() : clearingFind]);
+
   let takeSeq = 0; // which take a result belongs to (a give-back may come before it lands)
-  // Hand control back (prefix + give_back, or idle; until: when the takeover ended) and return
-  // to watching: q and Ctrl-C quit again until the next input.
+  // Hand control back (Esc in Normal, :done, idle; until: when the takeover ended) and return
+  // to watching.
   const giveBack = (until) => {
     clearTimeout(idleTimer);
-    hadInput = false;
     if (!holding) return;
     holding = false;
     confirmed = false;
     takeSeq++;
-    release(url, until);
+    leavePage();
+    if (modes.state().mode === 'insert') modes.setMode('normal');
+    release(url, until, tabsChanged);
+    tabsChanged = false;
     showStatus();
   };
 
-  // A mouse press, key, paste or wheel: the user acts on the page. On an agent browser that takes
-  // control (the input itself is sent at once, not after the file write).
+  // The user acts on the page (a click, wheel, or a key whose action changes the page). On an
+  // agent browser that takes control (the input itself is sent at once, not after the file write).
   const acted = () => {
-    hadInput = true;
     const now = Date.now();
     lastInputAt = now;
     if (!agentId) return;
@@ -482,6 +620,7 @@ export async function runViewer({
     if (!holding) {
       holding = true;
       confirmed = false;
+      tabsChanged = false;
       lastTouch = now;
       const at = url;
       const seq = ++takeSeq;
@@ -521,6 +660,262 @@ export async function runViewer({
     return cellToPage(col, row, place, term, viewport);
   };
 
+  // --- key and paste events wait while a page check runs ---
+  // After a click, a hint pick or gi the viewer asks the page whether a text field has focus;
+  // keys typed meanwhile must land in the mode that answer sets, so they are held until then.
+  // Each check is bounded by GATE_MS, and so is the total time a key waits: once the first held
+  // key has waited GATE_MS the gate is dropped and the held keys run (checks queued behind a
+  // stuck page would otherwise add up).
+  let gate = null;
+  let gateSeq = 0;
+  const held = []; // {ev, at}
+  let holdTimer = null;
+  const hold = (ev) => {
+    held.push({ ev, at: Date.now() });
+    if (!holdTimer) holdTimer = setTimeout(drain, GATE_MS);
+  };
+  const gated = (work) => {
+    const seq = ++gateSeq;
+    // Bounded: a page stuck on alert() never answers a click or a Target call, and keys
+    // (:q included) must not wait on it for ever.
+    const g = (gate ?? Promise.resolve()).then(() => within(Promise.resolve().then(work).catch(() => {}), GATE_MS)).then(() => {
+      if (seq !== gateSeq) return; // a later check drains
+      gate = null;
+      drain();
+    });
+    gate = g;
+    return g;
+  };
+  const drain = () => {
+    clearTimeout(holdTimer);
+    holdTimer = null;
+    if (closing) return;
+    if (gate && held.length && Date.now() - held[0].at >= GATE_MS) gate = null; // waited long enough
+    while (held.length && !gate && !closing) runActions(modes.handle(held.shift().ev, Date.now()));
+    if (held.length && !closing) holdTimer = setTimeout(drain, Math.max(0, held[0].at + GATE_MS - Date.now()));
+  };
+
+  // Only focus the user caused switches modes: called after their click, hint pick, gi, or a
+  // Tab / paste passed to the page; never on the agent's or the page's own focus changes.
+  const checkFocusNow = async () => {
+    const session = page;
+    let editable;
+    try {
+      editable = await ops.activeIsEditable(session);
+    } catch {
+      return; // the page didn't answer: keep the mode
+    }
+    if (closing || session !== page) return;
+    const { mode } = modes.state();
+    if (mode !== 'normal' && mode !== 'insert') return;
+    modes.setMode(editable ? 'insert' : 'normal');
+    showStatus();
+  };
+  // Coalesced: a check queued and not started yet answers for the later ones too.
+  let focusQueued = false;
+  const checkFocus = () => {
+    if (focusQueued) return gate;
+    focusQueued = true;
+    return gated(() => {
+      focusQueued = false;
+      return checkFocusNow();
+    });
+  };
+
+  // A page operation; a failure is shown, never thrown.
+  const pageOp = (fn) => {
+    const session = page;
+    Promise.resolve().then(() => fn(session)).catch((err) => flash(err.message, FAIL_NOTE_MS));
+  };
+  // Where keys scroll: the centre of the page (what a wheel there would scroll).
+  const centre = () => (viewport ? { x: Math.round(viewport.width / 2), y: Math.round(viewport.height / 2) } : undefined);
+  const showMatch = (r) => flash(r?.total ? `match ${r.index}/${r.total}` : 'no matches', MATCH_NOTE_MS);
+
+  // --- link hints ---
+  const startHints = (newTab) => {
+    hintNewTab = newTab;
+    hintTyped = '';
+    hintsOn = true;
+    hintScroll = lastScroll;
+    showStatus();
+    gated(async () => {
+      const session = page;
+      let hints = [];
+      try {
+        hints = await ops.showHints(session);
+      } catch (err) {
+        flash(err.message, FAIL_NOTE_MS);
+      }
+      if (closing || session !== page) return;
+      if (!hintsOn || modes.state().mode !== 'hints') return; // cancelled meanwhile
+      if (!hints.length) {
+        await cancelHints();
+        flash('no links to hint', FAIL_NOTE_MS);
+      }
+    });
+  };
+
+  const clickAt = async (session, x, y, mods) => {
+    const base = { x, y, button: 'left', clickCount: 1, modifiers: mods };
+    await session.send('Input.dispatchMouseEvent', { type: 'mousePressed', ...base, buttons: 1 });
+    await session.send('Input.dispatchMouseEvent', { type: 'mouseReleased', ...base, buttons: 0 });
+  };
+
+  const pickHint = async (match) => {
+    const session = page;
+    const newTab = hintNewTab;
+    await cancelHints(); // the labels go before the click lands
+    if (closing || session !== page) return;
+    // Cmd-click (Ctrl-click off macOS) opens a link in a new tab; the viewer follows it.
+    const mods = newTab ? (process.platform === 'darwin' ? 4 : 2) : 0;
+    await clickAt(session, match.x, match.y, mods).catch(() => {});
+    if (!newTab) await checkFocusNow();
+    showStatus();
+  };
+
+  const hintKey = (key) => gated(async () => {
+    if (!hintsOn || modes.state().mode !== 'hints') return;
+    if (key === 'Backspace') hintTyped = [...hintTyped].slice(0, -1).join('');
+    else if (key !== 'Enter') hintTyped += key.toLowerCase();
+    const session = page;
+    let r = await ops.filterHints(session, hintTyped);
+    if (closing || session !== page || !hintsOn) return;
+    if (r.match) {
+      await pickHint(r.match);
+      return;
+    }
+    if (r.remaining === 0 && hintTyped) {
+      // Not a label: drop the key, like Vimium.
+      hintTyped = [...hintTyped].slice(0, -1).join('');
+      r = await ops.filterHints(session, hintTyped);
+    }
+  });
+
+  // --- tabs ---
+  // The user changed tabs while holding control: the agent must re-select its page.
+  const markTabsChanged = () => {
+    if (!agentId || !holding || tabsChanged) return;
+    tabsChanged = true;
+    queueControl(() => touchControl(agentId, { viewerPid: process.pid, url, idleReturnMs, tabsChanged: true }, statePaths));
+  };
+  const tabOp = (op) => {
+    if (!browser) {
+      flash('tabs are not ready yet', FAIL_NOTE_MS);
+      return;
+    }
+    gated(async () => {
+      const current = target.id;
+      await leavePage();
+      if (op === 'close') closingTab = current;
+      let r;
+      try {
+        r = await ops.tabs(browser, op, current);
+      } catch (err) {
+        closingTab = null;
+        flash(err.message, FAIL_NOTE_MS);
+        return;
+      }
+      if (!r) {
+        closingTab = null;
+        flash(op === 'close' ? "won't close the last tab" : 'no other tab', FAIL_NOTE_MS);
+        return;
+      }
+      markTabsChanged();
+      if (r.targetId !== current) follow(r.targetId);
+    });
+  };
+
+  // --- help: a text page in the terminal (never in the agent's page) ---
+  const drawHelp = () => {
+    shownId = null;
+    const lines = helpLines(term.cols, Math.max(0, term.rows - 1));
+    status = statusText();
+    stdout.write(`${deleteAll()}${ESC}[2J${ESC}[H${lines.join('\r\n')}${statusSeq(status)}`);
+  };
+  const showHelp = () => {
+    helpShown = true;
+    drawHelp();
+  };
+  const closeHelp = () => {
+    if (!helpShown) return;
+    helpShown = false;
+    repaint = true; // the next frame clears the text
+    showStatus();
+    // Chrome sends no frame while the page is still: restarting sends the current one.
+    if (!paused && !closing) restartScreencast();
+  };
+
+  // --- the actions modes.js returns ---
+  const run = (a) => {
+    switch (a.type) {
+      case 'line': showStatus(); break;
+      case 'scroll': pageOp((s) => ops.scrollBy(s, a.dx, a.dy, centre())); break;
+      case 'halfPage': pageOp((s) => ops.halfPage(s, a.dir, centre())); break;
+      case 'scrollTo': pageOp((s) => ops.scrollTo(s, a.where)); break;
+      case 'history':
+        if (findOn) clearFindNow(); // a page from the back/forward cache keeps its highlights
+        pageOp(async (s) => {
+          if (!(await ops.history(s, a.dir))) flash(a.dir < 0 ? 'no page back' : 'no page forward', FAIL_NOTE_MS);
+        });
+        break;
+      case 'reload': pageOp((s) => ops.reload(s)); break;
+      case 'open': pageOp((s) => s.send('Page.navigate', { url: ops.normalizeUrl(a.url) })); break;
+      case 'sendEscape': pageOp((s) => ops.sendEscape(s)); break;
+      case 'tab': tabOp(a.op); break;
+      case 'find':
+        findOn = true;
+        gated(() => ops.find(page, a.text).then(showMatch, (err) => flash(err.message, FAIL_NOTE_MS)));
+        break;
+      case 'findNext':
+        gated(() => ops.findNext(page, a.dir).then(showMatch, (err) => flash(err.message, FAIL_NOTE_MS)));
+        break;
+      case 'findCancel': showStatus(); clearFindNow(); break;
+      case 'hints': startHints(!!a.newTab); break;
+      case 'hintKey': hintKey(a.key); break;
+      case 'hintsCancel': cancelHints(); showStatus(); break;
+      case 'enterInsert': showStatus(); break;
+      case 'exitInsert': pageOp((s) => ops.blurActive(s)); showStatus(); break;
+      case 'focusFirstInput':
+        gated(async () => {
+          const session = page;
+          const ok = await ops.focusFirstInput(session).catch(() => false);
+          if (closing || session !== page) return;
+          if (ok) {
+            modes.setMode('insert');
+            showStatus();
+          } else flash('no text field', FAIL_NOTE_MS);
+        });
+        break;
+      case 'pageKey':
+        sendKey(a.ev);
+        if (a.ev.key === 'Tab' && modes.state().mode === 'normal') checkFocus(); // Tab may move into a field
+        break;
+      case 'pagePaste': {
+        const wasNormal = modes.state().mode === 'normal';
+        send('Input.insertText', { text: a.text });
+        if (wasNormal) checkFocus();
+        break;
+      }
+      case 'copyUrl':
+        stdout.write(ops.osc52(url));
+        flash('copied the URL', BUSY_NOTE_MS);
+        break;
+      case 'help': showHelp(); break;
+      case 'helpClose': closeHelp(); break;
+      case 'handBack': giveBack(); break;
+      case 'quit': finish(0); break;
+      case 'error': flash(a.text, FAIL_NOTE_MS); break;
+      default: break;
+    }
+  };
+  const runActions = (actions) => {
+    for (const a of actions) {
+      if (closing) return;
+      if (a.takesControl) acted();
+      run(a);
+    }
+  };
+
   const sendMove = () => {
     moveTimer = null;
     if (!pendingMove || closing) return;
@@ -551,6 +946,10 @@ export async function runViewer({
       if (Date.now() - focusInAt < FOCUS_CLICK_MS) return;
       const at = pageAt(ev.col, ev.row);
       if (!at) return;
+      // A click leaves the : or / line and the hint labels.
+      const { mode } = modes.state();
+      if (mode === 'hints') cancelHints();
+      else if (mode === 'command' || mode === 'find') modes.setMode('normal');
       acted();
       const now = Date.now();
       const again = lastClick && lastClick.button === ev.button && now - lastClick.at <= CLICK_MS
@@ -564,6 +963,7 @@ export async function runViewer({
         type: 'mousePressed', ...at, button: ev.button, buttons: buttonsMask(),
         clickCount: lastClick.count, modifiers: modifiers(ev),
       });
+      showStatus();
       return;
     }
     // release: only for a press the page saw
@@ -577,6 +977,8 @@ export async function runViewer({
       type: 'mouseReleased', ...at, button: ev.button, buttons: buttonsMask(),
       clickCount: lastClick?.count ?? 1, modifiers: modifiers(ev),
     });
+    // Clicking a text field enters Insert; clicking anything else leaves it.
+    checkFocus();
   };
 
   const onWheel = (ev) => {
@@ -584,6 +986,7 @@ export async function runViewer({
     const at = pageAt(ev.col, ev.row);
     if (!at) return;
     acted();
+    if (hintsOn) { cancelHints(); showStatus(); } // the labels would no longer match
     const lines = ev.dy || 0;
     const sideways = ev.shift && !ev.dx;
     send('Input.dispatchMouseEvent', {
@@ -594,13 +997,7 @@ export async function runViewer({
     });
   };
 
-  const insertText = (text) => {
-    acted();
-    send('Input.insertText', { text });
-  };
-
   const sendKey = (ev) => {
-    acted();
     // Composed or non-ASCII text (é, emoji, IME) has no US key: insert it as text.
     if (isPrintable(ev) && /[^\x00-\x7f]/.test(ev.text)) {
       send('Input.insertText', { text: ev.text });
@@ -609,39 +1006,21 @@ export async function runViewer({
     for (const params of toKeyEvents(ev)) send('Input.dispatchKeyEvent', params);
   };
 
-  const disarm = () => {
-    clearTimeout(prefixTimer);
-    prefixTimer = null;
-    showStatus();
-  };
-
-  const onKeyEvent = (ev) => {
-    if (prefixTimer) {
-      disarm();
-      if (matchesSpec(ev, keys.quit)) finish(0);
-      else if (matchesSpec(ev, keys.giveBack)) giveBack();
-      else if (matchesSpec(ev, keys.prefix)) sendKey(ev);
-      return; // anything else just cancels the prefix
-    }
-    if (matchesSpec(ev, keys.prefix)) {
-      prefixTimer = setTimeout(disarm, PREFIX_MS);
-      showStatus();
-      return;
-    }
-    if (!hadInput && (matchesSpec(ev, keys.quit) || matchesSpec(ev, { key: 'c', ctrl: true }))) {
-      finish(0);
-      return;
-    }
-    sendKey(ev);
-  };
-
   const onEvent = (ev) => {
     if (closing) return;
-    if (ev.type === 'key') onKeyEvent(ev);
-    else if (ev.type === 'mouse') onMouse(ev);
-    else if (ev.type === 'wheel') onWheel(ev);
-    else if (ev.type === 'paste') insertText(ev.text);
-    else if (ev.type === 'focus') {
+    if (ev.type === 'key' || ev.type === 'paste') {
+      // A page check is running: its answer decides the mode first (keys wait at most GATE_MS).
+      // Ctrl-C outside Insert quits at once whatever the page is doing, even past waiting keys.
+      const ctrlC = ev.type === 'key' && ev.ctrl && !ev.alt && !ev.meta && ev.key.toLowerCase() === 'c';
+      if (gate && !(ctrlC && modes.state().mode !== 'insert')) hold(ev);
+      else runActions(modes.handle(ev, Date.now()));
+    } else if (ev.type === 'mouse' || ev.type === 'wheel') {
+      if (helpShown) return; // nothing of the page is on screen
+      if (ev.type === 'mouse') {
+        modes.handle(ev, Date.now()); // a press cancels a partial key sequence
+        onMouse(ev);
+      } else onWheel(ev);
+    } else if (ev.type === 'focus') {
       focusKnown = true;
       focused = ev.in;
       if (ev.in) focusInAt = Date.now();

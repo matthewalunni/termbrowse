@@ -1,7 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { toKeyEvents, isPrintable, matchesSpec } from '../src/keymap.js';
-import { parseKeySpec } from '../src/config.js';
+import { toKeyEvents, isPrintable } from '../src/keymap.js';
 
 test('printable key gives keyDown with text and keyUp', () => {
   const evs = toKeyEvents({ key: 'a', text: 'a' });
@@ -54,27 +53,4 @@ test('isPrintable', () => {
   assert.equal(isPrintable({ key: 'a', text: 'a' }), true);
   assert.equal(isPrintable({ key: 'a', ctrl: true }), false);
   assert.equal(isPrintable({ key: 'Enter' }), false);
-});
-
-test('matchesSpec', () => {
-  assert.equal(matchesSpec({ key: ']', ctrl: true }, parseKeySpec('ctrl-]')), true);
-  assert.equal(matchesSpec({ key: ']' }, parseKeySpec('ctrl-]')), false);
-  assert.equal(matchesSpec({ key: 'g' }, parseKeySpec('g')), true);
-  assert.equal(matchesSpec({ key: 'g', ctrl: true }, parseKeySpec('g')), false);
-  assert.equal(matchesSpec({ key: 'x', alt: true }, parseKeySpec('alt-x')), true);
-  assert.equal(matchesSpec({ key: 'Escape' }, parseKeySpec('escape')), true);
-  assert.equal(matchesSpec({ key: ' ' }, parseKeySpec('space')), true);
-});
-
-test('matchesSpec compares ctrl letters case-insensitively', () => {
-  assert.equal(matchesSpec({ key: 'a', ctrl: true }, parseKeySpec('ctrl-A')), true);
-  assert.equal(matchesSpec({ key: 'A', ctrl: true }, parseKeySpec('ctrl-a')), true);
-});
-
-test('matchesSpec: a lowercase letter spec matches either case (Caps Lock); an uppercase one only itself', () => {
-  assert.equal(matchesSpec({ key: 'G' }, parseKeySpec('g')), true);
-  assert.equal(matchesSpec({ key: 'Q', shift: true }, parseKeySpec('q')), true);
-  assert.equal(matchesSpec({ key: 'G' }, parseKeySpec('G')), true);
-  assert.equal(matchesSpec({ key: 'g' }, parseKeySpec('G')), false);
-  assert.equal(matchesSpec({ key: 'h' }, parseKeySpec('g')), false);
 });

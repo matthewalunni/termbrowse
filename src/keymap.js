@@ -58,15 +58,3 @@ export function toKeyEvents(ev) {
   if (ev.repeat) down.autoRepeat = true;
   return [down, { type: 'keyUp', ...base }];
 }
-
-// parseKeySpec names space 'Space'; the DOM key for it is ' '.
-const SPEC_KEY = { Space: ' ' };
-
-export function matchesSpec(ev, spec) {
-  if (!!ev.ctrl !== !!spec.ctrl || !!ev.alt !== !!spec.alt || ev.meta) return false;
-  const want = SPEC_KEY[spec.key] ?? spec.key;
-  // Terminals report Ctrl+letter without case, so ctrl-A and ctrl-a are the same key. A plain
-  // lowercase letter also matches its capital (Caps Lock, Shift); a capital spec only itself.
-  if (/^[a-zA-Z]$/.test(want) && (spec.ctrl || want === want.toLowerCase())) return ev.key.toLowerCase() === want.toLowerCase();
-  return ev.key === want;
-}

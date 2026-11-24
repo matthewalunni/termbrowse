@@ -330,6 +330,13 @@ const NOTE = /^Note from termbrowse: the user took control of this browser for /
 const notes = (r) => (r.result?.content ?? []).filter((c) => c.type === 'text' && NOTE.test(c.text)).map((c) => c.text);
 const WAIT_ERROR = { code: -32000, message: 'termbrowse: the user has control of the browser; try again later' };
 
+test('takeoverNote: appends the tab-change sentence only when tabsChanged', () => {
+  const base = takeoverNote({ durationMs: 40000, waited: true, url: 'https://x/' });
+  const t = takeoverNote({ durationMs: 40000, waited: true, url: 'https://x/', tabsChanged: true });
+  assert.equal(t, `${base} The user changed tabs; call list_pages and select_page before continuing.`);
+  assert.equal(takeoverNote({ durationMs: 40000, waited: true, url: 'https://x/', tabsChanged: false }), base);
+});
+
 test('takeoverNote: exact text, seconds and minutes', () => {
   assert.equal(
     takeoverNote({ durationMs: 40000, waited: true, url: 'https://x/' }),
@@ -594,5 +601,44 @@ test('the note gives the page the agent is on now, else where the user left it',
     const n = notes(await call(1));
     assert.equal(n.length, 1);
     assert.match(n[0], /it is now at https:\/\/left\/\. /);
+  });
+});
+
+test('a takeover whose control record has tabsChanged carries the tab-change sentence', { timeout: 30_000 }, async () => {
+  const { freePort } = await import('../src/chrome.js');
+  const fakeControl = (tabsChanged) => {
+    let reads = 0;
+    return {
+      readControl: async () => (reads++ === 0
+        ? { held: false, takeovers: 0, lastTakeover: null, agentBusySince: null }
+        : { held: false, takeovers: 1, lastTakeover: { since: 0, until: 5000, url: 'https://left/', tabsChanged }, agentBusySince: null }),
+      setAgentBusy: async () => {},
+    };
+  };
+  await withStub('test-tc', await freePort(), fakeControl(true), async (call) => {
+    const n = notes(await call(1));
+    assert.equal(n.length, 1);
+    assert.ok(n[0].endsWith(' The user changed tabs; call list_pages and select_page before continuing.'), n[0]);
+  });
+  await withStub('test-tc2', await freePort(), fakeControl(false), async (call) => {
+    const n = notes(await call(1));
+    assert.equal(n.length, 1);
+    assert.ok(!n[0].includes('changed tabs'), n[0]);
+  });
+});
+
+test('two takeovers between agent calls: a tab change in the first is still reported', { timeout: 30_000 }, async () => {
+  const { freePort } = await import('../src/chrome.js');
+  let reads = 0;
+  const fake = {
+    readControl: async () => (reads++ === 0
+      ? { held: false, takeovers: 0, lastTakeover: null, agentBusySince: null, tabsChangedAt: 0 }
+      : { held: false, takeovers: 2, lastTakeover: { since: 0, until: 5000, url: 'https://left/', tabsChanged: false }, agentBusySince: null, tabsChangedAt: 1 }),
+    setAgentBusy: async () => {},
+  };
+  await withStub('test-tc3', await freePort(), fake, async (call) => {
+    const n = notes(await call(1));
+    assert.equal(n.length, 1);
+    assert.ok(n[0].endsWith(' The user changed tabs; call list_pages and select_page before continuing.'), n[0]);
   });
 });

@@ -12,16 +12,12 @@ import { listTargets } from '../cdp.js';
 import { runViewer, NO_KITTY } from '../viewer.js';
 import { detectKitty } from '../tty.js';
 import { resolveFill } from './fill.js';
+import { normalizeUrl } from '../pageops.js';
 
 const SIGNALS = ['SIGINT', 'SIGTERM', 'SIGHUP'];
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-export function normalizeUrl(input) {
-  const s = String(input).trim();
-  if (/^(localhost|127\.0\.0\.1)(:\d+)?([/?#]|$)/i.test(s)) return `http://${s}`;
-  if (/^[a-z][a-z0-9+.-]*:\/\//i.test(s) || /^(about|data|blob|javascript|view-source|chrome):/i.test(s)) return s;
-  return `https://${s}`;
-}
+export { normalizeUrl };
 
 export async function runBrowse(
   input,
@@ -104,7 +100,6 @@ export async function runBrowse(
       env,
       signals,
       fill: resolveFill({ kind: 'standalone', ...cfg.view, flag: fillOverride }),
-      keys: cfg.keys,
       interactive: !watch && cfg.view.interactive,
       control: { agentId: null, idleReturnMs: cfg.control.idleReturnMs }, // standalone: no control file
       // Signals after this point reach the viewer directly; replay one it could not see.

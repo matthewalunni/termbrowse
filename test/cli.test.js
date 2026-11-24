@@ -262,9 +262,22 @@ test('browse: a terminal without Kitty graphics exits 2 before any Chrome or pro
   assert.equal(t.signals.listenerCount('SIGTERM'), 0);
 });
 
-async function startBrowse(pid, termOptions) {
+// A Kitty image, as the viewer draws a frame (the Kitty support query, which runBrowse also
+// writes before any Chrome starts, contains \x1b_G too, so that alone proves nothing).
+const FRAME = '\x1b_Ga=T';
+
+// onViewer(t) runs as soon as runBrowse has handed over to the viewer (synchronously, while the
+// viewer is in its startup). Tests that signal the run must do it from there or once a frame is
+// drawn: the registry entry is readable a moment before runBrowse checks for a signal, and a
+// signal in that moment ends the run with 130 by design (see runBrowse), not through the viewer.
+async function startBrowse(pid, termOptions, { onViewer } = {}) {
   const t = fakeTerm(termOptions);
-  const result = runBrowse('data:text/html,<body style="background:red">hi</body>', { ...t, pid });
+  const viewer = (o) => {
+    const run = runViewer(o);
+    onViewer?.(t);
+    return run;
+  };
+  const result = runBrowse('data:text/html,<body style="background:red">hi</body>', { ...t, pid, viewer });
   const entry = await until(async () => (await readRegistry(p)).find((e) => e.agentId === `standalone-${pid}`), 30_000);
   return { t, result, entry };
 }
@@ -284,7 +297,7 @@ test('browse: fresh starter copy per run, registered, drawn, closed and deleted 
     assert.ok(alive(run.entry.pid));
     await stat(join(run.entry.profileDir, 'from-starter'));
     await assert.rejects(stat(join(run.entry.profileDir, 'lockfile')));
-    assert.ok(await until(() => run.t.out().includes('\x1b_G'), 15_000), 'a Kitty frame was drawn');
+    assert.ok(await until(() => run.t.out().includes(FRAME), 15_000), 'a Kitty frame was drawn');
   }
   assert.notEqual(a.entry.port, b.entry.port);
   assert.notEqual(a.entry.profileDir, b.entry.profileDir);
@@ -306,12 +319,18 @@ test('browse: fresh starter copy per run, registered, drawn, closed and deleted 
 test('browse: a signal while the viewer is still starting ends the run and cleans up', { skip, timeout: 60_000 }, async () => {
   const pid = fakeChrome().pid;
   // The Kitty reply comes late, so the viewer is still in its startup when the signal lands.
-  const { t, result, entry } = await startBrowse(pid, { replyDelayMs: 600 });
+  let listening; // SIGTERM listeners when the signal landed: runBrowse's only, the viewer's not yet
+  const { t, result, entry } = await startBrowse(pid, { replyDelayMs: 600 }, {
+    onViewer: (term) => {
+      listening = term.signals.listenerCount('SIGTERM');
+      term.signals.emit('SIGTERM');
+    },
+  });
   assert.ok(entry, 'standalone entry registered');
-  t.signals.emit('SIGTERM');
   const code = await Promise.race([result, sleep(10_000).then(() => 'hung')]);
   if (code === 'hung') t.signals.emit('SIGTERM'); // let the run end so the test can clean up
   assert.notEqual(code, 'hung', 'the signal during viewer startup was swallowed');
+  assert.equal(listening, 1, 'the signal landed before the viewer attached its handlers');
   assert.equal(code, 0);
   assert.equal(alive(entry.pid), false);
   assert.deepEqual(await readRegistry(p), []);
@@ -323,7 +342,7 @@ test('browse: stdout errors after the terminal hangs up do not stop the cleanup'
   const pid = fakeChrome().pid;
   const { t, result, entry } = await startBrowse(pid);
   assert.ok(entry, 'standalone entry registered');
-  assert.ok(await until(() => t.out().includes('\x1b_G'), 15_000), 'a Kitty frame was drawn');
+  assert.ok(await until(() => t.out().includes(FRAME), 15_000), 'a Kitty frame was drawn');
   const eio = () => Object.assign(new Error('write EIO'), { code: 'EIO' });
   const write = t.stdout.write;
   t.stdout.write = (chunk, ...rest) => {
@@ -432,6 +451,35 @@ http.createServer((q, r) => {
   assert.match(out, /Saving your sign-ins…/);
 });
 
+test('login: quitting now does not wait for a Chrome that is slow to close', { timeout: 60_000 }, async () => {
+  // A stand-in Chrome with one page that ignores Browser.close (no CDP endpoint at all) and quits
+  // on SIGTERM, as a real one busy shutting down would only after a while.
+  const exe = join(tmp, 'slow-close-chrome.mjs');
+  await writeFile(exe, `#!${process.execPath}
+import http from 'node:http';
+const port = Number(process.argv.find((a) => a.startsWith('--remote-debugging-port=')).split('=')[1]);
+http.createServer((q, r) => r.end(q.url === '/json/list' ? JSON.stringify([{ id: 'P', type: 'page', url: 'about:blank' }]) : '{"Browser":"fake"}')).listen(port, '127.0.0.1');
+process.on('SIGTERM', () => process.exit(0));
+`);
+  await import('node:fs/promises').then((m) => m.chmod(exe, 0o755));
+  for (const quit of [['SIGINT', 'SIGINT'], ['SIGTERM']]) {
+    const stdin = new PassThrough();
+    const stdout = new PassThrough();
+    let out = '';
+    stdout.on('data', (d) => (out += d));
+    const signals = new EventEmitter();
+    const loginEnv = process.platform === 'linux' && !env.DISPLAY && !env.WAYLAND_DISPLAY ? { ...env, DISPLAY: ':0' } : env;
+    const result = runLogin([], { stdin, stdout, stderr: new PassThrough(), env: loginEnv, signals, saveDelayMs: 60_000, chromeOptions: { headless: true, executablePath: exe } });
+    assert.ok(await until(() => out.includes('press Enter'), 10_000));
+    stdin.write('\n');
+    assert.ok(await until(() => out.includes('Saving your sign-ins…'), 5000));
+    const t0 = Date.now();
+    for (const sig of quit) signals.emit(sig);
+    assert.equal(await result, 130, quit.join(' '));
+    assert.ok(Date.now() - t0 < 5000, `${quit.join(' ')} took ${Date.now() - t0} ms`);
+  }
+});
+
 test('no arguments prints usage and exits 2', async () => {
   const r = await run([]);
   assert.equal(r.code, 2);
@@ -487,7 +535,7 @@ test('view --agent ID passes that agent id to the viewer; --port on an agent por
   assert.deepEqual(seen.map((o) => o.port), [40011, 40011, 40012, 40013]);
   assert.deepEqual(seen.map((o) => o.control.agentId), ['ctl-agent', 'ctl-agent', null, null], 'only agent browsers are controlled');
   assert.equal(seen[0].control.idleReturnMs, 300_000);
-  assert.equal(seen[0].keys.prefix.label, 'Ctrl-]');
+  assert.ok(seen.every((o) => !('keys' in o)), 'no [keys] any more');
   assert.ok(seen.every((o) => o.interactive === true), 'interactive by default');
 });
 

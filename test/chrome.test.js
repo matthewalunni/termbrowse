@@ -126,6 +126,31 @@ http.createServer((q, r) => r.end('{"Browser":"fake"}')).listen(port, '127.0.0.1
   assert.ok(await waitDead(helper), 'helper pid alive');
 });
 
+// Real Chrome's helpers (GPU, network, renderers) can outlive the main process by a moment and
+// still write to the profile: kill() returns only once the whole group is gone, so a caller can
+// delete the profile right after.
+test('kill() waits for helpers that outlive the main process', async () => {
+  const pidfile = join(tmp, 'lingering.pids');
+  const exe = join(tmp, 'lingering-chrome.mjs');
+  await writeFile(exe, `#!${process.execPath}
+import http from 'node:http';
+import { spawn } from 'node:child_process';
+import { writeFileSync } from 'node:fs';
+const helper = spawn('/bin/sh', ['-c', 'trap "sleep 0.6; exit 0" TERM; while :; do sleep 0.1; done'], { stdio: 'ignore' });
+writeFileSync(${JSON.stringify(pidfile)}, process.pid + ' ' + helper.pid);
+process.on('SIGTERM', () => process.exit(0));
+const port = Number(process.argv.find((a) => a.startsWith('--remote-debugging-port=')).split('=')[1]);
+http.createServer((q, r) => r.end('{"Browser":"fake"}')).listen(port, '127.0.0.1');
+`);
+  await chmod(exe, 0o755);
+  const c = await launchChrome({ executablePath: exe, profileDir: join(tmp, 'pl'), headless: true, windowSize: [1, 1], extraArgs: [], killGraceMs: 3000 });
+  const [main, helper] = (await readFile(pidfile, 'utf8')).split(' ').map(Number);
+  assert.ok(alive(main) && alive(helper));
+  await c.kill();
+  assert.equal(alive(main), false, 'main pid alive');
+  assert.equal(alive(helper), false, 'kill() returned while a helper was still running');
+});
+
 test('chrome that exits before opening its port rejects at once with the exit code', async () => {
   const exe = await fakeChrome('exit-chrome', 'exit 7');
   const t0 = Date.now();

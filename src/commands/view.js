@@ -52,7 +52,6 @@ export async function runView(args, { stderr = process.stderr, env = process.env
     stderr,
     env,
     fill: resolveFill({ kind, ...cfg.view, flag }),
-    keys: cfg.keys,
     interactive: !values.watch && cfg.view.interactive, // watch only: no input, never takes control
     // Control (and the agent's wait) applies to agent browsers only.
     control: { agentId: kindOf(entry) === 'agent' ? entry.agentId : null, idleReturnMs: cfg.control.idleReturnMs },
