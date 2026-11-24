@@ -93,6 +93,18 @@ test('a page exception rejects', async () => {
   await f.done();
 });
 
+test('a page that never answers Runtime.evaluate rejects within ~2 s (alert, debugger, stuck thread)', async () => {
+  const f = await fake({ 'Runtime.evaluate': () => new Promise(() => {}) });
+  for (const op of [() => ops.removeHints(f.page), () => ops.blurActive(f.page)]) {
+    const t0 = Date.now();
+    await assert.rejects(op(), /did not answer within 2000 ms/);
+    const ms = Date.now() - t0;
+    assert.ok(ms >= 1900 && ms < 2500, `rejected after ${ms} ms`);
+  }
+  assert.equal(f.sent('Runtime.evaluate')[0].awaitPromise, undefined, 'page functions are synchronous');
+  await f.done();
+});
+
 test('sendEscape sends keyDown and keyUp Escape', async () => {
   const f = await fake();
   await ops.sendEscape(f.page);

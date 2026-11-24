@@ -25,8 +25,19 @@ export function hintLabels(n, alphabet = 'asdfghjkl') {
   return hints.slice(offset, offset + n);
 }
 
+// A page blocked on alert(), a paused debugger or a stuck main thread never answers
+// Runtime.evaluate; give up after this long so callers (and exit paths) never hang.
+const EVAL_TIMEOUT_MS = 2000;
+
 async function evaluate(page, expression) {
-  const r = await page.send('Runtime.evaluate', { expression, returnByValue: true, awaitPromise: true });
+  let timer;
+  const timeout = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`page did not answer within ${EVAL_TIMEOUT_MS} ms`)), EVAL_TIMEOUT_MS);
+  });
+  // Every page function here is synchronous, so no awaitPromise.
+  const r = await Promise.race([page.send('Runtime.evaluate', { expression, returnByValue: true }), timeout]).finally(() =>
+    clearTimeout(timer),
+  );
   if (r?.exceptionDetails) {
     const d = r.exceptionDetails;
     throw new Error(d.exception?.description ?? d.text ?? 'page script failed');
