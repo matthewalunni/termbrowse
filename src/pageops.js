@@ -6,6 +6,14 @@
 const ALPHABET = 'asdfghjkl';
 const OVERLAY_ID = '__termbrowse_hints';
 
+// `termbrowse <url>` and `:o <url>`: a scheme where one is missing.
+export function normalizeUrl(input) {
+  const s = String(input).trim();
+  if (/^(localhost|127\.0\.0\.1)(:\d+)?([/?#]|$)/i.test(s)) return `http://${s}`;
+  if (/^[a-z][a-z0-9+.-]*:\/\//i.test(s) || /^(about|data|blob|javascript|view-source|chrome):/i.test(s)) return s;
+  return `https://${s}`;
+}
+
 // OSC 52 clipboard write: ESC ] 52 ; c ; <base64> BEL.
 export function osc52(text) {
   return `\x1b]52;c;${Buffer.from(String(text)).toString('base64')}\x07`;
@@ -364,6 +372,8 @@ function isTab(info) {
 
 // op: 'next' | 'prev' | 'new' | 'close'. Returns the tab to show now, or null when nothing changed
 // (close never closes the last tab; next/prev with one tab). Order: Target.getTargets.
+// Never Target.activateTarget: on macOS it can bring Chrome's window to the front and take focus;
+// the viewer just shows the returned tab.
 export async function tabs(browser, op, currentTargetId) {
   if (!['next', 'prev', 'new', 'close'].includes(op)) throw new Error(`unknown tab op: ${op}`);
   if (op === 'new') {
@@ -377,13 +387,10 @@ export async function tabs(browser, op, currentTargetId) {
     if (i < 0 || pages.length < 2) return null;
     const next = pages[i + 1] ?? pages[i - 1];
     await browser.send('Target.closeTarget', { targetId: currentTargetId });
-    await browser.send('Target.activateTarget', { targetId: next });
     return { targetId: next };
   }
   if (pages.length < 2 && i >= 0) return null;
   if (!pages.length) return null;
   const n = pages.length;
-  const next = i < 0 ? pages[0] : pages[(i + (op === 'next' ? 1 : -1) + n) % n];
-  await browser.send('Target.activateTarget', { targetId: next });
-  return { targetId: next };
+  return { targetId: i < 0 ? pages[0] : pages[(i + (op === 'next' ? 1 : -1) + n) % n] };
 }

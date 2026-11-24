@@ -13,26 +13,14 @@ function parseBool(value, key, file) {
   return value;
 }
 
-const NAMED_KEYS = { escape: 'Escape', tab: 'Tab', enter: 'Enter', space: 'Space' };
-
-export function parseKeySpec(str) {
-  const original = String(str);
-  let ctrl = false;
-  let alt = false;
-  let rest = original.trim();
-  for (;;) {
-    const lower = rest.toLowerCase();
-    if (lower.startsWith('ctrl-') && rest.length > 5) { ctrl = true; rest = rest.slice(5); } else if (lower.startsWith('alt-') && rest.length > 4) { alt = true; rest = rest.slice(4); } else break;
-  }
-  const lower = rest.toLowerCase();
-  let key;
-  if (NAMED_KEYS[lower]) key = NAMED_KEYS[lower];
-  else if (/^f([1-9]|1[0-2])$/.test(lower)) key = lower.toUpperCase();
-  else if ([...rest].length === 1) key = rest;
-  else throw new Error(`invalid key "${original}" (expected e.g. "ctrl-]", "alt-x", "g", "f2", "escape")`);
-  const label = `${ctrl ? 'Ctrl-' : ''}${alt ? 'Alt-' : ''}${key}`;
-  return { key, ctrl, alt, label };
-}
+// [keys] (prefix, give_back, quit) belonged to the Ctrl-] prefix the vim mode replaced.
+export const KEYS_RETIRED = 'termbrowse: [keys] is no longer used (vim mode); see README\n';
+let keysWarned = false;
+const warnOnce = (msg) => {
+  if (keysWarned) return;
+  keysWarned = true;
+  process.stderr.write(msg);
+};
 
 const DURATION_UNITS = { ms: 1, s: 1000, m: 60000, h: 3600000 };
 const MAX_DURATION_MS = 24 * 86_400_000; // under setTimeout's limit (2^31 - 1 ms, about 24.8 days)
@@ -53,7 +41,8 @@ function inFile(file, key, fn, value) {
   }
 }
 
-export async function loadConfig(env = process.env) {
+// warn: where the retired-[keys] warning goes (default: stderr, once per process).
+export async function loadConfig(env = process.env, { warn = warnOnce } = {}) {
   const file = env.TERMBROWSE_CONFIG || paths(env).config;
   let raw = {};
   let text;
@@ -70,6 +59,7 @@ export async function loadConfig(env = process.env) {
     }
   }
   const { chrome = {}, agents = {}, hooks = {}, view = {}, keys = {}, control = {} } = raw;
+  if (keys && typeof keys === 'object' && ['prefix', 'give_back', 'quit'].some((k) => k in keys)) warn(KEYS_RETIRED);
   return {
     chrome: {
       channel: chrome.channel ?? 'stable',
@@ -84,11 +74,6 @@ export async function loadConfig(env = process.env) {
       fillPane: parseBool(view.fill_pane ?? true, 'fill_pane', file),
       fillPaneForAgents: parseBool(view.fill_pane_for_agents ?? false, 'fill_pane_for_agents', file),
       interactive: parseBool(view.interactive ?? true, 'interactive', file),
-    },
-    keys: {
-      prefix: inFile(file, 'prefix', parseKeySpec, keys.prefix ?? 'ctrl-]'),
-      giveBack: inFile(file, 'give_back', parseKeySpec, keys.give_back ?? 'g'),
-      quit: inFile(file, 'quit', parseKeySpec, keys.quit ?? 'q'),
     },
     control: {
       idleReturnMs: inFile(file, 'idle_return', parseDuration, control.idle_return ?? '5m'),

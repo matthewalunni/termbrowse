@@ -47,6 +47,26 @@ test('release records lastTakeover and keeps takeovers; a second take+release ma
   assert.equal(c.lastTakeover.url, 'https://c.test/');
 });
 
+test('release records tabsChanged on the takeover (false unless set); a new take starts clean', async () => {
+  const p = await tmpPaths();
+  await take(p);
+  await releaseControl('a1', { url: 'https://b.test/', tabsChanged: true }, p);
+  assert.equal((await readControl('a1', p)).lastTakeover.tabsChanged, true);
+  await take(p);
+  await releaseControl('a1', { url: 'https://c.test/' }, p);
+  assert.equal((await readControl('a1', p)).lastTakeover.tabsChanged, false);
+});
+
+test('a tab change touched into the record survives an idle (stale) release', async () => {
+  const p = await tmpPaths();
+  await take(p, { idleReturnMs: 50 });
+  await touch(p, { idleReturnMs: 50, tabsChanged: true });
+  await sleep(80);
+  const c = await readControl('a1', p);
+  assert.equal(c.held, false);
+  assert.equal(c.lastTakeover.tabsChanged, true);
+});
+
 test('no file reads as not held', async () => {
   const c = await readControl('nobody', await tmpPaths());
   assert.deepEqual(c, { held: false, takeovers: 0, lastTakeover: null, agentBusySince: null });

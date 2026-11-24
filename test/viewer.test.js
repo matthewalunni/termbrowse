@@ -10,7 +10,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { cellToPage, fit } from '../src/layout.js';
 import { paths } from '../src/paths.js';
-import { parseKeySpec } from '../src/config.js';
+import { osc52 } from '../src/pageops.js';
 import { controlPath, readControl, setAgentBusy } from '../src/control.js';
 
 const ESC = '\x1b';
@@ -27,8 +27,8 @@ function fakePng(width = 1037, height = 1443) {
 }
 
 // Fake terminal: stdout is a TTY PassThrough; stdin answers CSI 16t/14t/DA1 and the Kitty query.
-function fakeTerm({ kitty = true } = {}) {
-  const size = { cols: 61, rows: 40, pxW: 1037, pxH: 1480 };
+function fakeTerm({ kitty = true, cols = 61 } = {}) {
+  const size = { cols, rows: 40, pxW: cols * 17, pxH: 1480 };
   const stdout = new PassThrough();
   stdout.isTTY = true;
   Object.defineProperty(stdout, 'columns', { get: () => size.cols });
@@ -116,7 +116,7 @@ test('a known Kitty terminal skips the query', async () => {
   const { p } = start(t, { env: { HC_TERMINAL_ID: 't9' } });
   await until(() => methods(fake, 'Page.startScreencast').length === 1);
   assert.ok(!t.out().includes(kittyQuery()));
-  t.stdin.write('q');
+  t.stdin.write(':q\r');
   assert.equal(await p, 0);
 });
 
@@ -145,8 +145,8 @@ test('draws frames', async () => {
   // Tab discovery starts on its own connection, independent of the frames: wait for it.
   await until(() => methods(fake, 'Target.setDiscoverTargets').length >= 1);
   assert.equal(methods(fake, 'Target.setDiscoverTargets').length, 1);
-  assert.match(t.out(), new RegExp(`${ESC}\\[40;1H${ESC}\\[2Khttps://example.com/  \\d+ fps`));
-  t.stdin.write('q');
+  assert.match(t.out(), new RegExp(`${ESC}\\[40;1H${ESC}\\[2KNORMAL · https://exa`));
+  t.stdin.write(':q\r');
   assert.equal(await p, 0);
 });
 
@@ -207,14 +207,14 @@ test('re-attaches to another tab when the viewed tab closes but Chrome stays up'
     { id: 'T1', type: 'page', url: 'https://example.com/', title: 'Example' },
     { id: 'T2', type: 'page', url: 'https://other.example/', title: 'Other' },
   ]);
-  const t = fakeTerm();
+  const t = fakeTerm({ cols: 120 }); // wide: the status row shows whole URLs
   const { p } = start(t);
   await until(() => methods(fake, 'Page.startScreencast').length === 1);
   fake.closeSockets(); // the tab's socket drops; /json/version still answers
   await until(() => methods(fake, 'Page.startScreencast').length === 2);
   await until(() => t.out().includes('https://other.example/'));
   assert.doesNotMatch(t.out(), /disconnected/);
-  t.stdin.write('q');
+  t.stdin.write(':q\r');
   assert.equal(await p, 0);
 });
 
@@ -224,7 +224,7 @@ test('when a followed popup closes, goes back to its opener', async () => {
     { id: 'T2', type: 'page', url: 'https://other.example/', title: 'Other' },
   ];
   fake = await startFakeCdpWith(targets);
-  const t = fakeTerm();
+  const t = fakeTerm({ cols: 120 }); // wide: the status row shows whole URLs
   const { p } = start(t);
   await until(() => methods(fake, 'Target.setDiscoverTargets').length === 1 && methods(fake, 'Page.startScreencast').length === 1);
   targets.push({ id: 'T3', type: 'page', url: 'https://popup.example/', title: 'Popup', webSocketDebuggerUrl: fake.wsUrl });
@@ -234,7 +234,7 @@ test('when a followed popup closes, goes back to its opener', async () => {
   fake.closeSockets();
   await until(() => methods(fake, 'Page.startScreencast').length === 3);
   await until(() => t.out().lastIndexOf('https://example.com/') > t.out().lastIndexOf('https://popup.example/'));
-  t.stdin.write('q');
+  t.stdin.write(':q\r');
   assert.equal(await p, 0);
 });
 
@@ -254,14 +254,14 @@ test('pauses on bogus size, resumes on a sane one', async () => {
   const sc = methods(fake, 'Page.startScreencast')[1];
   assert.equal(sc.params.maxWidth, 800);
   assert.equal(sc.params.maxHeight, 480);
-  t.stdin.write('q');
+  t.stdin.write(':q\r');
   assert.equal(await p, 0);
 });
 
 test('follows a popup opened by the current page', async () => {
   const targets = [{ id: 'T1', type: 'page', url: 'https://example.com/', title: 'Example' }];
   fake = await startFakeCdpWith(targets);
-  const t = fakeTerm();
+  const t = fakeTerm({ cols: 120 }); // wide: the status row shows whole URLs
   const { p } = start(t);
   await until(() => methods(fake, 'Target.setDiscoverTargets').length === 1 && methods(fake, 'Page.startScreencast').length === 1);
   targets.push({ id: 'T2', type: 'page', url: 'https://popup.example/', title: 'Popup', webSocketDebuggerUrl: fake.wsUrl });
@@ -269,21 +269,21 @@ test('follows a popup opened by the current page', async () => {
   fake.send({ method: 'Target.targetCreated', params: { targetInfo: { targetId: 'T2', type: 'page', openerId: 'T1', url: 'https://popup.example/' } } });
   await until(() => methods(fake, 'Page.startScreencast').length === 2);
   await until(() => t.out().includes('https://popup.example/'));
-  t.stdin.write('q');
+  t.stdin.write(':q\r');
   assert.equal(await p, 0);
 });
 
 test('follows a new page that has no opener (chrome-devtools-mcp new_page)', async () => {
   const targets = [{ id: 'T1', type: 'page', url: 'https://example.com/', title: 'Example' }];
   fake = await startFakeCdpWith(targets);
-  const t = fakeTerm();
+  const t = fakeTerm({ cols: 120 }); // wide: the status row shows whole URLs
   const { p } = start(t);
   await until(() => methods(fake, 'Target.setDiscoverTargets').length === 1 && methods(fake, 'Page.startScreencast').length === 1);
   targets.push({ id: 'T2', type: 'page', url: 'https://new.example/', title: 'New', webSocketDebuggerUrl: fake.wsUrl });
   fake.send({ method: 'Target.targetCreated', params: { targetInfo: { targetId: 'T2', type: 'page', url: 'https://new.example/' } } });
   await until(() => methods(fake, 'Page.startScreencast').length === 2);
   await until(() => t.out().includes('https://new.example/'));
-  t.stdin.write('q');
+  t.stdin.write(':q\r');
   assert.equal(await p, 0);
 });
 
@@ -303,13 +303,13 @@ test('pages that already exist when discovery starts are not followed', async ()
     },
   });
   for (const x of targets) x.webSocketDebuggerUrl = fake.wsUrl;
-  const t = fakeTerm();
+  const t = fakeTerm({ cols: 120 }); // wide: the status row shows whole URLs
   const { p } = start(t);
   await until(() => methods(fake, 'Target.setDiscoverTargets').length === 1 && methods(fake, 'Page.startScreencast').length === 1);
   await new Promise((r) => setTimeout(r, 200));
   assert.equal(methods(fake, 'Page.startScreencast').length, 1);
   assert.ok(!t.out().includes('https://old.example/'));
-  t.stdin.write('q');
+  t.stdin.write(':q\r');
   assert.equal(await p, 0);
 });
 
@@ -360,7 +360,7 @@ test('fill: the page is laid out at the pane image area, again on resize, cleare
   await until(() => methods(fake, SET).length === 2);
   assert.deepEqual(methods(fake, SET)[1].params, { width: 800, height: 480, deviceScaleFactor: 1, mobile: false });
   assert.equal(methods(fake, CLEAR).length, 0);
-  t.stdin.write('q');
+  t.stdin.write(':q\r');
   assert.equal(await p, 0);
   assert.equal(methods(fake, CLEAR).length, 1);
 });
@@ -378,7 +378,7 @@ test('fill: switching tabs clears the old page and fits the new one', async () =
   assert.equal(methods(fake, CLEAR)[0].conn, oldConn, 'cleared on the page that was fitted');
   assert.notEqual(methods(fake, SET)[1].conn, oldConn, 'fitted on the new page');
   assert.deepEqual(methods(fake, SET)[1].params, { width: 1037, height: 1443, deviceScaleFactor: 1, mobile: false });
-  t.stdin.write('q');
+  t.stdin.write(':q\r');
   assert.equal(await p, 0);
   assert.equal(methods(fake, CLEAR).length, 2);
   assert.equal(methods(fake, CLEAR)[1].conn, methods(fake, SET)[1].conn);
@@ -426,7 +426,7 @@ test('fill off: the page size is never touched', async () => {
   await until(() => methods(fake, 'Page.startScreencast').length === 1);
   Object.assign(t.size, { cols: 80, rows: 25, pxW: 800, pxH: 500 });
   await controls().resize();
-  t.stdin.write('q');
+  t.stdin.write(':q\r');
   assert.equal(await p, 0);
   assert.equal(methods(fake, SET).length, 0);
   assert.equal(methods(fake, CLEAR).length, 0);
@@ -442,7 +442,7 @@ test('status says idle, not 0 fps, once frames stop', async () => {
     },
   });
   const t = fakeTerm();
-  const { p } = start(t);
+  const { p } = start(t, { interactive: false }); // watch only keeps the frame rate on the status row
   await until(() => count(t.out(), 'a=T,f=100') === 1);
   assert.match(t.out(), /https:\/\/example\.com\/  1 fps/);
   await until(() => /https:\/\/example\.com\/  idle/.test(t.out().slice(t.out().lastIndexOf('a=T,f=100'))), 3000);
@@ -475,7 +475,7 @@ test('a burst of resizes restarts once and keeps the last frame until a new one 
   await until(() => t.out().slice(from).includes('a=T,f=100'));
   const after = t.out().slice(from);
   assert.ok(after.indexOf(deleteAll()) >= 0 && after.indexOf(deleteAll()) < after.indexOf('a=T,f=100'));
-  t.stdin.write('q');
+  t.stdin.write(':q\r');
   assert.equal(await p, 0);
 });
 
@@ -483,7 +483,7 @@ test('a burst of resizes restarts once and keeps the last frame until a new one 
 test('prerender targets and non-web URLs are not followed; chrome://newtab is', async () => {
   const targets = [{ id: 'T1', type: 'page', url: 'https://example.com/', title: 'Example' }];
   fake = await startFakeCdpWith(targets);
-  const t = fakeTerm();
+  const t = fakeTerm({ cols: 120 }); // wide: the status row shows whole URLs
   const { p } = start(t);
   await until(() => methods(fake, 'Target.setDiscoverTargets').length === 1 && methods(fake, 'Page.startScreencast').length === 1);
   const skipped = [
@@ -502,7 +502,7 @@ test('prerender targets and non-web URLs are not followed; chrome://newtab is', 
   fake.send({ method: 'Target.targetCreated', params: { targetInfo: { targetId: 'N1', type: 'page', url: 'chrome://newtab/' } } });
   await until(() => methods(fake, 'Page.startScreencast').length === 2);
   await until(() => t.out().includes('chrome://newtab/'));
-  t.stdin.write('q');
+  t.stdin.write(':q\r');
   assert.equal(await p, 0);
 });
 
@@ -511,7 +511,7 @@ test('two tabs created back to back: the viewer ends on the later one', async ()
   // The first new tab's socket is slow to open, so without ordering it would be adopted last.
   fake = await startFakeCdp({ targets, connectDelay: (url) => (url.includes('slow') ? 300 : 0) });
   targets[0].webSocketDebuggerUrl = fake.wsUrl;
-  const t = fakeTerm();
+  const t = fakeTerm({ cols: 120 }); // wide: the status row shows whole URLs
   const { p } = start(t);
   await until(() => methods(fake, 'Target.setDiscoverTargets').length === 1 && methods(fake, 'Page.startScreencast').length === 1);
   targets.push({ id: 'T2', type: 'page', url: 'https://first.example/', webSocketDebuggerUrl: `${fake.wsUrl}?slow` });
@@ -522,7 +522,7 @@ test('two tabs created back to back: the viewer ends on the later one', async ()
   await new Promise((r) => setTimeout(r, 600)); // the slow one has connected by now
   const out = t.out();
   assert.ok(out.lastIndexOf('https://second.example/') > out.lastIndexOf('https://first.example/'), 'ended on the earlier tab');
-  t.stdin.write('q');
+  t.stdin.write(':q\r');
   assert.equal(await p, 0);
 });
 
@@ -552,7 +552,7 @@ test('fill: re-applied on re-attach after the tab closes, and cleared on exit', 
   fake.closeSockets();
   await until(() => methods(fake, SET).some((m) => m.conn !== first));
   const second = methods(fake, SET).at(-1).conn;
-  t.stdin.write('q');
+  t.stdin.write(':q\r');
   assert.equal(await p, 0);
   assert.equal(lastOverride(second), CLEAR);
 });
@@ -603,7 +603,7 @@ test('fill: Chrome going away (exit 1) with fill on still restores the terminal'
 });
 
 // --- keys and finishing ---
-test('interactive: q in the same chunk as a terminal reply still quits before any input', async () => {
+test('interactive: :q in the same chunk as a terminal reply still quits', async () => {
   fake = await startFakeCdp();
   const t = fakeTerm();
   const { p } = start(t);
@@ -613,7 +613,7 @@ test('interactive: q in the same chunk as a terminal reply still quits before an
   t.stdin.write(`${ESC}_Gi=31;OK${ESC}\\`);
   await new Promise((r) => setTimeout(r, 100));
   assert.equal(done, false, 'a reply alone quit');
-  t.stdin.write(`${ESC}[?62;cq`);
+  t.stdin.write(`${ESC}[?62;c:q\r`);
   assert.equal(await p, 0);
 });
 
@@ -684,7 +684,7 @@ test('quitting leaves no viewer timers running', async () => {
   await until(() => methods(fake, 'Page.startScreencast').length === 1);
   await new Promise((r) => setTimeout(r, 20)); // let until()'s own timer finish
   const before = timers(); // ref'd timers only (the status ticker is unref'd)
-  t.stdin.write('q');
+  t.stdin.write(':q\r');
   assert.equal(await p, 0);
   assert.ok(timers() <= before, `a timer outlives the viewer: ${before} before quit, ${timers()} after`);
 });
@@ -711,9 +711,9 @@ test('frames alternate image ids 1,2,1; the new image is placed before the previ
     assert.ok(w.indexOf('a=T,f=100') < w.indexOf(`a=d,d=I,i=${prev}`), `frame ${i + 1} deletes image ${prev} after placing`);
     assert.equal(count(w, 'a=d'), 1);
     assert.ok(w.indexOf(`a=d,d=I,i=${prev}`) < w.indexOf(`${ESC}[40;1H`), 'status row still last');
-    assert.ok(w.endsWith(w.slice(w.indexOf(`${ESC}[40;1H`))) && /\x1b\[40;1H\x1b\[2K.* fps · Ctrl-] q quit$/.test(w));
+    assert.ok(w.endsWith(w.slice(w.indexOf(`${ESC}[40;1H`))) && /\x1b\[40;1H\x1b\[2KNORMAL · .*:q quit/.test(w));
   }
-  t.stdin.write('q');
+  t.stdin.write(':q\r');
   assert.equal(await p, 0);
   assert.ok(t.out().endsWith(leaveScreen()) && leaveScreen().includes(deleteAll()), 'exit clears every image');
 });
@@ -735,7 +735,7 @@ test('after a resize repaint everything is cleared and the next frame starts cle
   const w = t.out().slice(from);
   assert.ok(w.indexOf(deleteAll()) < w.indexOf('a=T,f=100'), 'repaint clears all first');
   assert.ok(!w.includes('a=d,d=I'), 'no per-image delete right after a full clear');
-  t.stdin.write('q');
+  t.stdin.write(':q\r');
   assert.equal(await p, 0);
 });
 
@@ -744,9 +744,11 @@ const W = 1037; // CSS viewport the fake frames report (metadata.deviceWidth/Hei
 const H = 1443;
 
 // A fake CDP whose screencast sends one frame of png size w x h, so the viewer has an image placed.
-async function startDrawing(w = 1037, h = 1443) {
+async function startDrawing(w = 1037, h = 1443, { handlers = {}, targets } = {}) {
   const f = await startFakeCdp({
+    targets,
     handlers: {
+      ...handlers,
       'Page.startScreencast': () => {
         setTimeout(() => f.send({ method: 'Page.screencastFrame', params: { data: fakePng(w, h), sessionId: 1, metadata: { deviceWidth: W, deviceHeight: H } } }), 10);
         return {};
@@ -760,8 +762,8 @@ async function tmpHome() {
   return fs.mkdtemp(path.join(os.tmpdir(), 'tb-view-'));
 }
 
-async function startInteractive(opts = {}, png = [1037, 1443]) {
-  fake = await startDrawing(...png);
+async function startInteractive(opts = {}, png = [1037, 1443], extra = {}) {
+  fake = await startDrawing(...png, extra);
   const t = fakeTerm();
   const v = start(t, opts);
   await until(() => count(t.out(), 'a=T,f=100') === 1);
@@ -782,7 +784,7 @@ const MODES_ON = `${ESC}[?1003h${ESC}[?1006h${ESC}[?2004h${ESC}[>29u`;
 test('interactive: enables mouse, paste and Kitty keyboard on start and restores them on q', async () => {
   const { t, p } = await startInteractive();
   assert.ok(t.out().includes(MODES_ON));
-  t.stdin.write('q');
+  t.stdin.write(':q\r');
   assert.equal(await p, 0);
   const tail = t.out().slice(t.out().lastIndexOf(MODES_ON));
   assert.ok(t.out().includes(`${ESC}[?1004h`), 'focus reporting on');
@@ -834,7 +836,7 @@ test('interactive: click outside image ignored (status row, letterbox) and takes
   await sleep(150);
   assert.equal(mouse().length, 0);
   await assert.rejects(fs.access(controlPath('ag1', paths({ HOME: home }))));
-  t.stdin.write('q'); // still before the first input
+  t.stdin.write(':q\r');
   assert.equal(await p, 0);
 });
 
@@ -854,9 +856,9 @@ test('interactive: wheel down scrolls 100 px; shift-wheel scrolls sideways', asy
   assert.equal(await p, 0);
 });
 
-test('interactive: typed string arrives in order', async () => {
+test('interactive: typed string arrives in order (Insert)', async () => {
   const { t, p } = await startInteractive();
-  t.stdin.write('abc');
+  t.stdin.write('iabc');
   await until(() => keyDowns().length === 3);
   assert.deepEqual(keyDowns().map((k) => [k.type, k.key, k.text]), [['keyDown', 'a', 'a'], ['keyDown', 'b', 'b'], ['keyDown', 'c', 'c']]);
   const all = methods(fake, 'Input.dispatchKeyEvent').map((m) => `${m.params.type}:${m.params.key}`);
@@ -865,8 +867,9 @@ test('interactive: typed string arrives in order', async () => {
   assert.equal(await p, 0);
 });
 
-test('interactive: paste and non-ASCII text are inserted as text', async () => {
+test('interactive: paste and non-ASCII text are inserted as text (Insert)', async () => {
   const { t, p } = await startInteractive();
+  t.stdin.write('i');
   t.stdin.write(`${ESC}[200~hello\nworld${ESC}[201~`);
   t.stdin.write('é');
   await until(() => methods(fake, 'Input.insertText').length === 2);
@@ -876,84 +879,51 @@ test('interactive: paste and non-ASCII text are inserted as text', async () => {
   assert.equal(await p, 0);
 });
 
-test('interactive: before any input Ctrl-C quits', async () => {
+test('interactive: Ctrl-C in Normal quits', async () => {
   const { t, p } = await startInteractive();
   t.stdin.write('\x03');
   assert.equal(await p, 0);
   assert.equal(methods(fake, 'Input.dispatchKeyEvent').length, 0);
 });
 
-test('interactive: after a click, q goes to the page and the viewer keeps running', async () => {
+test('interactive: Ctrl-C goes to the page in Insert; after Esc it quits', async () => {
   const { t, p } = await startInteractive();
   let done = false;
   p.then(() => { done = true; });
   click(t, 10, 5);
+  t.stdin.write('q'); // unmapped in Normal: dropped
+  t.stdin.write('i');
   t.stdin.write('q');
   t.stdin.write('\x03');
   await until(() => keyDowns().length === 2);
   assert.deepEqual(keyDowns().map((k) => [k.key, k.modifiers]), [['q', 0], ['c', 2]]);
   await sleep(100);
   assert.equal(done, false);
-  t.stdin.write(`\x1dq`); // prefix, quit
+  t.stdin.write(`${ESC}[27u`); // Esc: Normal
+  t.stdin.write('\x03');
   assert.equal(await p, 0);
+  assert.equal(keyDowns().length, 2);
 });
 
-test('interactive: prefix then q quits; status shows prefix… while armed', async () => {
-  const { t, p } = await startInteractive();
-  click(t, 10, 5);
-  t.stdin.write('\x1d');
-  await until(() => t.out().includes('prefix…'));
-  t.stdin.write('q');
-  assert.equal(await p, 0);
-  assert.equal(keyDowns().length, 0);
-});
-
-test('interactive: prefix twice sends the prefix key; anything else cancels it', async () => {
-  const { t, p } = await startInteractive();
-  t.stdin.write('\x1d\x1d');
-  await until(() => keyDowns().length === 1);
-  assert.equal(keyDowns()[0].key, ']');
-  assert.equal(keyDowns()[0].modifiers, 2);
-  t.stdin.write('\x1dx'); // cancelled: x is dropped
-  t.stdin.write('y');
-  await until(() => keyDowns().length === 2);
-  assert.equal(keyDowns()[1].key, 'y');
-  t.stdin.write(`${ESC}[93;5u`); // Kitty keyboard form of Ctrl-]
-  t.stdin.write(`${ESC}[113u`); // q
-  assert.equal(await p, 0);
-});
-
-test('interactive: the prefix disarms after 2 s', async () => {
-  const { t, p } = await startInteractive();
-  click(t, 10, 5);
-  t.stdin.write('\x1d');
-  await sleep(2100);
-  t.stdin.write('q');
-  await until(() => keyDowns().length === 1);
-  assert.equal(keyDowns()[0].key, 'q');
-  t.signals.emit('SIGTERM');
-  assert.equal(await p, 0);
-});
-
-test('interactive: on an agent browser the first click takes control; prefix g hands it back', async () => {
+test('interactive: on an agent browser the first click takes control; Esc hands it back', async () => {
   const home = await tmpHome();
   const p0 = paths({ HOME: home });
   const { t, p } = await startInteractive(agentOpts(home));
-  await until(() => /agent · https:\/\/example\.com\/ · \d+ fps/.test(t.out()));
+  await until(() => (lastStatus(t) ?? '').startsWith('NORMAL · agent driving · '));
   click(t, 10, 5);
   await untilAsync(async () => (await readControl('ag1', p0)).held);
   const c = JSON.parse(await fs.readFile(controlPath('ag1', p0), 'utf8'));
   assert.equal(c.viewerPid, process.pid);
   assert.equal(c.url, 'https://example.com/');
   assert.equal(c.idleReturnMs, 300_000);
-  await until(() => t.out().includes('you have control · Ctrl-] g to hand back'));
-  const from = t.out().length;
-  t.stdin.write('\x1dg');
+  await until(() => (lastStatus(t) ?? '').startsWith('NORMAL · you have control · Esc or :done hand back'));
+  t.stdin.write(`${ESC}[27u`);
   await untilAsync(async () => !(await readControl('ag1', p0)).held);
   const after = await readControl('ag1', p0);
   assert.equal(after.takeovers, 1);
   assert.equal(after.lastTakeover.url, 'https://example.com/');
-  await until(() => /agent · https:\/\/example\.com\/ · /.test(t.out().slice(from)));
+  assert.equal(after.lastTakeover.tabsChanged, false);
+  await until(() => (lastStatus(t) ?? '').startsWith('NORMAL · agent driving · '));
   t.signals.emit('SIGTERM');
   assert.equal(await p, 0);
 });
@@ -985,13 +955,13 @@ test('interactive: a standalone browser forwards hover always and never writes a
   await until(() => mouse().length === 1);
   assert.equal(mouse()[0].type, 'mouseMoved');
   click(t, 10, 5);
-  t.stdin.write('abc');
+  t.stdin.write('iabc');
   await until(() => keyDowns().length === 3);
   await sleep(100);
   await assert.rejects(fs.readdir(path.join(paths({ HOME: home }).state, 'control')));
   assert.ok(!t.out().includes('you have control'));
-  t.stdin.write('\x1dg'); // nothing to hand back
-  t.stdin.write('\x1dq');
+  t.stdin.write(`${ESC}[27u${ESC}[27u`); // Insert → Normal; nothing to hand back
+  t.stdin.write(':q\r');
   assert.equal(await p, 0);
 });
 
@@ -1018,7 +988,7 @@ test('interactive: idle return hands control back on its own', async () => {
   await untilAsync(async () => (await readControl('ag1', p0)).held);
   const raw = () => fs.readFile(controlPath('ag1', p0), 'utf8').then(JSON.parse);
   await untilAsync(async () => (await raw()).holder === null, 1000);
-  await until(() => /agent · https:\/\/example\.com\/ · [^\n]*$/.test(t.out()));
+  await until(() => (lastStatus(t) ?? '').startsWith('NORMAL · agent driving'));
   t.signals.emit('SIGTERM');
   assert.equal(await p, 0);
 });
@@ -1048,7 +1018,7 @@ test('interactive: a failed take of control is shown and never claimed', async (
   await sleep(100);
   assert.equal(mouse().length, 2);
   await sleep(3100); // the message passes; back to the agent status
-  assert.match(t.out().slice(t.out().lastIndexOf(`${ESC}[40;1H`)), /agent · https:\/\/example\.com\/ · /);
+  assert.match(lastStatus(t), /^NORMAL · agent driving/);
   t.signals.emit('SIGTERM');
   assert.equal(await p, 0);
 });
@@ -1061,7 +1031,7 @@ test('interactive: a failed hand back is shown', async () => {
   await until(() => t.out().includes('you have control'));
   await fs.rm(p0.profiles, { recursive: true });
   await fs.writeFile(p0.profiles, 'not a directory'); // the locked write fails from now on
-  t.stdin.write('\x1dg');
+  t.stdin.write(`${ESC}[27u`);
   await until(() => t.out().includes("couldn't hand back control: "));
   t.signals.emit('SIGTERM');
   assert.equal(await p, 0);
@@ -1093,15 +1063,15 @@ const lastStatus = (t) => {
   return all.at(-1)?.[1];
 };
 
-test('interactive: after handing back, q and Ctrl-C quit again (nothing to the page, no new takeover)', async () => {
+test('interactive: after handing back, Ctrl-C quits (nothing to the page, no new takeover)', async () => {
   const home = await tmpHome();
   const p0 = paths({ HOME: home });
   const { t, p } = await startInteractive(agentOpts(home));
   click(t, 10, 5);
   await untilAsync(async () => (await readControl('ag1', p0)).held);
-  t.stdin.write('\x1dg');
+  t.stdin.write(`${ESC}[27u`);
   await untilAsync(async () => !(await readControl('ag1', p0)).held);
-  t.stdin.write('q');
+  t.stdin.write('\x03');
   assert.equal(await p, 0);
   assert.equal(keyDowns().length, 0);
   const c = await readControl('ag1', p0);
@@ -1113,30 +1083,30 @@ test('interactive: status rows always say how to quit', async () => {
   const home = await tmpHome();
   {
     const { t, p } = await startInteractive();
-    await until(() => /https:\/\/example\.com\/  \d+ fps · Ctrl-] q quit$/.test(lastStatus(t) ?? ''));
+    await until(() => lastStatus(t) === 'NORMAL · https://exa… · f links · i insert · :q quit · ? help');
     t.signals.emit('SIGTERM');
     assert.equal(await p, 0);
     await fake.close();
   }
   {
     const { t, p } = await startInteractive(agentOpts(home));
-    await until(() => /^agent · https:\/\/example\.com\/ · \d+ fps · Ctrl-] q quit$/.test(lastStatus(t) ?? ''));
+    await until(() => lastStatus(t) === 'NORMAL · agent driving · f links · i insert · :q quit');
     t.signals.emit('SIGTERM');
     assert.equal(await p, 0);
     await fake.close();
   }
   {
-    // Custom keys are named; a narrow pane shortens the URL, never past the width.
+    // A narrow pane drops the URL and the other hints, never the way out.
     fake = await startDrawing();
     const t = fakeTerm();
     t.size.cols = 30;
     t.size.pxW = 30 * 17;
-    const { p } = start(t, { ...agentOpts(home), keys: { prefix: parseKeySpec('ctrl-a'), giveBack: parseKeySpec('g'), quit: parseKeySpec('x') } });
-    await until(() => count(t.out(), 'a=T,f=100') === 1 && (lastStatus(t) ?? '').startsWith('agent · '));
-    const row = lastStatus(t);
-    assert.ok(row.length <= 30, row);
-    assert.equal(row.length, 30, row);
-    assert.match(row, /^agent · .* · Ctrl-a x quit$/);
+    const { p } = start(t, agentOpts(home));
+    await until(() => count(t.out(), 'a=T,f=100') === 1 && (lastStatus(t) ?? '').startsWith('NORMAL'));
+    assert.equal(lastStatus(t), 'NORMAL · :q quit');
+    t.stdin.write('i');
+    await until(() => (lastStatus(t) ?? '').startsWith('INSERT'));
+    assert.ok(lastStatus(t).length <= 30);
     t.signals.emit('SIGTERM');
     assert.equal(await p, 0);
   }
@@ -1210,27 +1180,8 @@ test('interactive: idle hand back ends the takeover at the last input, not after
   await untilAsync(async () => (await raw()).holder === null, 2000);
   const { since, until: end } = (await raw()).lastTakeover;
   assert.ok(end - since < 200, `takeover lasted ${end - since} ms`);
-  t.stdin.write('q'); // back to watching
+  t.stdin.write(':q\r');
   assert.equal(await p, 0);
-});
-
-test('interactive: reserved letters match either case (Caps Lock); the pre-input quit is keys.quit', async () => {
-  const home = await tmpHome();
-  const p0 = paths({ HOME: home });
-  const { t, p } = await startInteractive(agentOpts(home));
-  click(t, 10, 5);
-  await untilAsync(async () => (await readControl('ag1', p0)).held);
-  t.stdin.write('\x1dG');
-  await untilAsync(async () => !(await readControl('ag1', p0)).held);
-  t.stdin.write('Q');
-  assert.equal(await p, 0);
-  assert.equal(keyDowns().length, 0);
-  await fake.close();
-
-  const v = await startInteractive({ keys: { prefix: parseKeySpec('ctrl-]'), giveBack: parseKeySpec('g'), quit: parseKeySpec('x') } });
-  v.t.stdin.write('x');
-  assert.equal(await v.p, 0);
-  assert.equal(keyDowns().length, 0);
 });
 
 test('escFlushMs: long with the Kitty keyboard protocol or over ssh, short otherwise', () => {
@@ -1241,15 +1192,20 @@ test('escFlushMs: long with the Kitty keyboard protocol or over ssh, short other
 
 test('interactive: a lone ESC waits 300 ms once the terminal acknowledges the Kitty keyboard protocol', async () => {
   const { t, p } = await startInteractive();
+  const mode = () => (lastStatus(t) ?? '').split(' ')[0];
+  t.stdin.write('i');
+  await until(() => mode() === 'INSERT');
   t.stdin.write(ESC);
-  await until(() => keyDowns().length === 1, 200); // plain terminal: 50 ms
-  assert.equal(keyDowns()[0].key, 'Escape');
+  await until(() => mode() === 'NORMAL', 200); // plain terminal: 50 ms
   t.stdin.write(`${ESC}[?29u`); // keyboard flags reply
   await sleep(20);
+  t.stdin.write('i');
+  await until(() => mode() === 'INSERT');
   t.stdin.write(ESC);
   await sleep(150);
-  assert.equal(keyDowns().length, 1, 'flushed too soon');
-  await until(() => keyDowns().length === 2, 500);
+  assert.equal(mode(), 'INSERT', 'flushed too soon');
+  await until(() => mode() === 'NORMAL', 500);
+  assert.equal(keyDowns().length, 0, 'Esc never reaches the page');
   t.signals.emit('SIGTERM');
   assert.equal(await p, 0);
 });
@@ -1269,7 +1225,7 @@ test('a process exit before finish still restores the terminal; finish removes t
     await fake.close();
   }
   const { t, p } = await startInteractive();
-  t.stdin.write('q');
+  t.stdin.write(':q\r');
   assert.equal(await p, 0);
   assert.equal(t.signals.listenerCount('exit'), 0);
 });
@@ -1281,3 +1237,361 @@ async function untilAsync(cond, ms = 3000) {
     await new Promise((r) => setTimeout(r, 10));
   }
 }
+
+// --- vim mode: Normal/Insert, the : line, hints, find, tabs, help ---
+
+// Page-side answers for pageops' Runtime.evaluate calls, by page function name.
+// state: { editable, hints, tabs, focusFirst }
+function pageFake(state = {}) {
+  const hints = state.hints ?? [
+    { label: 'a', x: 100, y: 200, editable: false },
+    { label: 's', x: 300, y: 400, editable: false },
+  ];
+  const value = (v) => ({ result: { value: v } });
+  return {
+    'Runtime.evaluate': ({ expression }) => {
+      const name = /^\(function (\w+)/.exec(expression)?.[1];
+      switch (name) {
+        case 'activeIsEditableInPage': return value(!!state.editable);
+        case 'blurInPage': state.editable = false; return value(null);
+        case 'focusFirstInputInPage': state.editable = !!state.focusFirst; return value(!!state.focusFirst);
+        case 'showHintsInPage': return value(hints);
+        case 'filterHintsInPage': {
+          const typed = JSON.parse(/, ("(?:[^"\\]|\\.)*"), "__termbrowse_hints"\)$/.exec(expression)[1]);
+          const left = hints.filter((h) => h.label.startsWith(typed));
+          return value({ match: typed && left.length === 1 ? left[0] : null, remaining: left.length });
+        }
+        case 'findInPage': return value(/, null, null\)$/.test(expression) ? null : { index: 1, total: 3 });
+        default: return value(null);
+      }
+    },
+    'Page.getLayoutMetrics': () => ({ cssLayoutViewport: { clientWidth: W, clientHeight: H } }),
+    'Target.getTargets': () => ({ targetInfos: state.tabs ?? [{ targetId: 'T1', type: 'page', url: 'https://example.com/' }] }),
+  };
+}
+const evals = (name) => methods(fake, 'Runtime.evaluate').filter((m) => m.params.expression.startsWith(`(function ${name}`));
+const findClears = () => evals('findInPage').filter((m) => /, null, null\)$/.test(m.params.expression));
+const ESC_KEY = `${ESC}[27u`; // Escape in the Kitty keyboard protocol: never a split sequence
+const startVim = (opts = {}, state = {}, targets) => startInteractive(opts, [1037, 1443], { handlers: pageFake(state), targets });
+
+async function startWide(opts, state = {}) {
+  fake = await startDrawing(1037, 1443, { handlers: pageFake(state) });
+  const t = fakeTerm();
+  t.size.cols = 120;
+  t.size.pxW = 120 * 17;
+  const v = start(t, opts);
+  await until(() => count(t.out(), 'a=T,f=100') === 1);
+  return { t, ...v };
+}
+
+test('vim: status lines name the mode, who drives and the way out', async () => {
+  const home = await tmpHome();
+  {
+    const { t, p } = await startWide(agentOpts(home));
+    await until(() => lastStatus(t) === 'NORMAL · agent driving · https://example.com/ · f links · i insert · :q quit · ? help');
+    click(t, 10, 5);
+    await until(() => lastStatus(t) === 'NORMAL · you have control · Esc or :done hand back · https://example.com/');
+    t.stdin.write('i');
+    await until(() => lastStatus(t) === 'INSERT · you have control · Esc normal');
+    t.signals.emit('SIGTERM');
+    assert.equal(await p, 0);
+    await fake.close();
+  }
+  const { t, p } = await startWide({ env: { HOME: home } });
+  await until(() => lastStatus(t) === 'NORMAL · https://example.com/ · f links · i insert · :q quit · ? help');
+  t.stdin.write('i');
+  await until(() => lastStatus(t) === 'INSERT · Esc normal');
+  t.stdin.write(ESC_KEY);
+  t.stdin.write(':o exa');
+  await until(() => lastStatus(t) === ':o exa█');
+  t.stdin.write(ESC_KEY);
+  t.stdin.write('/fo');
+  await until(() => lastStatus(t) === '/fo█');
+  t.stdin.write('o\r');
+  await until(() => lastStatus(t) === 'match 1/3');
+  t.signals.emit('SIGTERM');
+  assert.equal(await p, 0);
+});
+
+test('vim: j scrolls 60 px at the page centre and takes control of an agent browser', async () => {
+  const home = await tmpHome();
+  const p0 = paths({ HOME: home });
+  const { t, p } = await startVim(agentOpts(home));
+  t.stdin.write('j');
+  await until(() => mouse().length === 1);
+  assert.deepEqual(mouse()[0], { type: 'mouseWheel', x: Math.round(W / 2), y: Math.round(H / 2), deltaX: 0, deltaY: 60 });
+  await untilAsync(async () => (await readControl('ag1', p0)).held);
+  t.signals.emit('SIGTERM');
+  assert.equal(await p, 0);
+});
+
+test('vim: ? shows the key list in the terminal without taking control; any key closes it', async () => {
+  const home = await tmpHome();
+  const { t, p } = await startVim(agentOpts(home), { tabs: [{ targetId: 'T1', type: 'page', url: 'https://example.com/' }, { targetId: 'T2', type: 'page', url: 'https://two.test/' }] });
+  await until(() => methods(fake, 'Target.setDiscoverTargets').length >= 1);
+  t.stdin.write('?');
+  await until(() => t.out().includes('scroll down') && lastStatus(t) === 'help · any key to close');
+  const shown = t.out().length;
+  // Frames arriving under the help page are not drawn.
+  fake.send({ method: 'Page.screencastFrame', params: { data: fakePng(), sessionId: 9, metadata: { deviceWidth: W, deviceHeight: H } } });
+  await until(() => methods(fake, 'Page.screencastFrameAck').some((m) => m.params.sessionId === 9));
+  await sleep(30);
+  assert.ok(!t.out().slice(shown).includes('a=T,f=100'), 'drew a frame over the help page');
+  t.stdin.write('x'); // closes help; is not "close tab"
+  await until(() => methods(fake, 'Page.startScreencast').length === 2); // repaint
+  await until(() => count(t.out().slice(shown), 'a=T,f=100') >= 1);
+  assert.equal(methods(fake, 'Target.closeTarget').length, 0);
+  await assert.rejects(fs.access(controlPath('ag1', paths({ HOME: home }))));
+  t.stdin.write(':help\r');
+  await until(() => count(t.out(), 'help · any key to close') >= 2);
+  t.stdin.write('q');
+  await sleep(50);
+  t.stdin.write(':q\r');
+  assert.equal(await p, 0);
+  await assert.rejects(fs.access(controlPath('ag1', paths({ HOME: home }))));
+});
+
+test('vim: :q quits, handing back and restoring the terminal', async () => {
+  const home = await tmpHome();
+  const p0 = paths({ HOME: home });
+  const { t, p } = await startVim(agentOpts(home));
+  click(t, 10, 5);
+  await untilAsync(async () => (await readControl('ag1', p0)).held);
+  t.stdin.write(':q\r');
+  assert.equal(await p, 0);
+  assert.equal((await readControl('ag1', p0)).held, false);
+  assert.ok(t.out().endsWith(MODES_OFF + leaveScreen()));
+  assert.equal(t.stdin.isRaw, false);
+});
+
+test('vim: a field the agent focused never enters Insert: j scrolls, :q quits, nothing is typed', async () => {
+  const home = await tmpHome();
+  const { t, p } = await startVim(agentOpts(home), { editable: true });
+  t.stdin.write('j');
+  await until(() => mouse().length === 1);
+  assert.equal(mouse()[0].type, 'mouseWheel');
+  await sleep(50);
+  assert.ok(lastStatus(t).startsWith('NORMAL'));
+  t.stdin.write(':q\r');
+  assert.equal(await p, 0);
+  assert.equal(keyDowns().length, 0);
+  assert.equal(methods(fake, 'Input.insertText').length, 0);
+  assert.equal(evals('activeIsEditableInPage').length, 0, 'no focus check without a user action');
+});
+
+test('vim: clicking a text field enters Insert; typing goes to the page; Esc normal, Esc hands back', async () => {
+  const home = await tmpHome();
+  const p0 = paths({ HOME: home });
+  const state = { editable: true };
+  const { t, p } = await startVim(agentOpts(home), state);
+  click(t, 10, 5);
+  await until(() => lastStatus(t) === 'INSERT · you have control · Esc normal');
+  t.stdin.write('ab');
+  await until(() => keyDowns().length === 2);
+  assert.deepEqual(keyDowns().map((k) => k.key), ['a', 'b']);
+  t.stdin.write(ESC_KEY);
+  await until(() => (lastStatus(t) ?? '').startsWith('NORMAL · you have control · Esc or :done hand back'));
+  await until(() => evals('blurInPage').length === 1);
+  assert.equal((await readControl('ag1', p0)).held, true);
+  t.stdin.write(ESC_KEY);
+  await untilAsync(async () => !(await readControl('ag1', p0)).held);
+  await until(() => (lastStatus(t) ?? '').startsWith('NORMAL · agent driving'));
+  // Esc Esc pressed rapidly from Insert: Normal and handed back, no key lost to the page.
+  state.editable = true;
+  click(t, 10, 5);
+  await until(() => lastStatus(t) === 'INSERT · you have control · Esc normal');
+  await untilAsync(async () => (await readControl('ag1', p0)).held);
+  t.stdin.write(ESC_KEY + ESC_KEY);
+  await untilAsync(async () => !(await readControl('ag1', p0)).held);
+  await until(() => (lastStatus(t) ?? '').startsWith('NORMAL · agent driving'));
+  assert.equal(keyDowns().length, 2);
+  assert.equal((await readControl('ag1', p0)).takeovers, 2);
+  t.signals.emit('SIGTERM');
+  assert.equal(await p, 0);
+});
+
+test('vim: :done hands control back and keeps watching', async () => {
+  const home = await tmpHome();
+  const p0 = paths({ HOME: home });
+  const { t, p } = await startVim(agentOpts(home));
+  let done = false;
+  p.then(() => { done = true; });
+  click(t, 10, 5);
+  await untilAsync(async () => (await readControl('ag1', p0)).held);
+  t.stdin.write(':done\r');
+  await untilAsync(async () => !(await readControl('ag1', p0)).held);
+  await until(() => (lastStatus(t) ?? '').startsWith('NORMAL · agent driving'));
+  assert.equal(done, false);
+  t.signals.emit('SIGTERM');
+  assert.equal(await p, 0);
+});
+
+test('vim: gi focuses the first text field and enters Insert', async () => {
+  const { t, p } = await startVim({}, { focusFirst: true });
+  t.stdin.write('gi');
+  await until(() => lastStatus(t) === 'INSERT · Esc normal');
+  t.stdin.write('z');
+  await until(() => keyDowns().length === 1);
+  t.signals.emit('SIGTERM');
+  assert.equal(await p, 0);
+});
+
+test('vim: f labels links in the page; typing a label clicks its centre and removes the labels', async () => {
+  const home = await tmpHome();
+  const p0 = paths({ HOME: home });
+  const { t, p } = await startVim(agentOpts(home));
+  t.stdin.write('f');
+  await until(() => evals('showHintsInPage').length === 1 && lastStatus(t) === 'f: type a label');
+  await untilAsync(async () => (await readControl('ag1', p0)).held); // hints change the agent's page
+  t.stdin.write('s');
+  await until(() => mouse().length === 2);
+  const [down, up] = mouse();
+  assert.deepEqual([down.type, down.x, down.y, down.button], ['mousePressed', 300, 400, 'left']);
+  assert.deepEqual([up.type, up.x, up.y], ['mouseReleased', 300, 400]);
+  const order = fake.received.map((m) => (m.method === 'Runtime.evaluate' ? /^\(function (\w+)/.exec(m.params.expression)?.[1] : m.method));
+  assert.ok(order.indexOf('removeHintsInPage') >= 0 && order.indexOf('removeHintsInPage') < order.indexOf('Input.dispatchMouseEvent'), 'labels removed before the click');
+  await until(() => (lastStatus(t) ?? '').startsWith('NORMAL'));
+  t.signals.emit('SIGTERM');
+  assert.equal(await p, 0);
+});
+
+test('vim: hint labels are removed on every exit (Esc, Ctrl-C, idle hand back, SIGTERM, page scroll)', async () => {
+  const home = await tmpHome();
+  const p0 = paths({ HOME: home });
+  const showHints = async (t) => {
+    t.stdin.write('f');
+    await until(() => evals('showHintsInPage').length === 1 && lastStatus(t) === 'f: type a label');
+  };
+  { // Esc
+    const { t, p } = await startVim(agentOpts(home));
+    await showHints(t);
+    t.stdin.write(ESC_KEY);
+    await until(() => evals('removeHintsInPage').length === 1);
+    await until(() => (lastStatus(t) ?? '').startsWith('NORMAL'));
+    assert.equal((await readControl('ag1', p0)).held, true, 'Esc from hints does not hand back');
+    t.signals.emit('SIGTERM');
+    assert.equal(await p, 0);
+    await fake.close();
+  }
+  { // Ctrl-C quits
+    const { t, p } = await startVim(agentOpts(home));
+    await showHints(t);
+    t.stdin.write('\x03');
+    assert.equal(await p, 0);
+    assert.equal(evals('removeHintsInPage').length, 1);
+    await fake.close();
+  }
+  { // idle hand back
+    const { t, p } = await startVim(agentOpts(home, { idleReturnMs: 300 }));
+    await showHints(t);
+    await untilAsync(async () => (await readControl('ag1', p0)).held);
+    await untilAsync(async () => !(await readControl('ag1', p0)).held, 2000);
+    await until(() => evals('removeHintsInPage').length === 1);
+    await until(() => (lastStatus(t) ?? '').startsWith('NORMAL · agent driving'));
+    t.signals.emit('SIGTERM');
+    assert.equal(await p, 0);
+    await fake.close();
+  }
+  { // SIGTERM
+    const { t, p } = await startVim(agentOpts(home));
+    await showHints(t);
+    t.signals.emit('SIGTERM');
+    assert.equal(await p, 0);
+    assert.equal(evals('removeHintsInPage').length, 1);
+    await fake.close();
+  }
+  { // the page scrolls under the labels
+    const { t, p } = await startVim(agentOpts(home));
+    const frame = (y, id) => fake.send({ method: 'Page.screencastFrame', params: { data: fakePng(), sessionId: id, metadata: { deviceWidth: W, deviceHeight: H, scrollOffsetX: 0, scrollOffsetY: y } } });
+    frame(0, 5);
+    await until(() => count(t.out(), 'a=T,f=100') === 2);
+    await showHints(t);
+    frame(0, 6); // the labels themselves: same scroll
+    await until(() => count(t.out(), 'a=T,f=100') === 3);
+    assert.equal(evals('removeHintsInPage').length, 0);
+    frame(300, 7);
+    await until(() => evals('removeHintsInPage').length === 1);
+    await until(() => (lastStatus(t) ?? '').startsWith('NORMAL'));
+    t.stdin.write('s'); // Normal again: s is not a hint
+    await sleep(50);
+    assert.equal(mouse().length, 0);
+    t.signals.emit('SIGTERM');
+    assert.equal(await p, 0);
+  }
+});
+
+test('vim: find highlights are cleared on every exit (Esc on the / line, :q, hand back)', async () => {
+  const home = await tmpHome();
+  const p0 = paths({ HOME: home });
+  { // Esc while typing the search
+    const { t, p } = await startVim(agentOpts(home));
+    t.stdin.write('/fo');
+    await until(() => lastStatus(t) === '/fo█');
+    t.stdin.write(ESC_KEY);
+    await until(() => findClears().length === 1);
+    t.signals.emit('SIGTERM');
+    assert.equal(await p, 0);
+    await fake.close();
+  }
+  { // :q after a find
+    const { t, p } = await startVim(agentOpts(home));
+    t.stdin.write('/foo\r');
+    await until(() => lastStatus(t) === 'match 1/3');
+    assert.match(evals('findInPage')[0].params.expression, /, "foo", null\)$/);
+    t.stdin.write('n');
+    await until(() => evals('findInPage').length === 2);
+    t.stdin.write(':q\r');
+    assert.equal(await p, 0);
+    assert.equal(findClears().length, 1);
+    await fake.close();
+  }
+  { // hand back (Esc in Normal) after a find
+    const { t, p } = await startVim(agentOpts(home));
+    t.stdin.write('/foo\r');
+    await until(() => lastStatus(t) === 'match 1/3');
+    await untilAsync(async () => (await readControl('ag1', p0)).held);
+    t.stdin.write(ESC_KEY);
+    await untilAsync(async () => !(await readControl('ag1', p0)).held);
+    await until(() => findClears().length === 1);
+    t.signals.emit('SIGTERM');
+    assert.equal(await p, 0);
+  }
+});
+
+test('vim: yy copies the URL with OSC 52 and never takes control', async () => {
+  const home = await tmpHome();
+  const { t, p } = await startVim(agentOpts(home));
+  t.stdin.write('yy');
+  await until(() => t.out().includes(osc52('https://example.com/')));
+  await sleep(50);
+  await assert.rejects(fs.access(controlPath('ag1', paths({ HOME: home }))));
+  t.signals.emit('SIGTERM');
+  assert.equal(await p, 0);
+});
+
+test('vim: J switches tab without activating it in Chrome, clears find; the takeover records tabsChanged', async () => {
+  const home = await tmpHome();
+  const p0 = paths({ HOME: home });
+  const tabs = [{ targetId: 'T1', type: 'page', url: 'https://example.com/' }, { targetId: 'T2', type: 'page', url: 'https://two.test/' }];
+  // /json/list: both tabs, served by the one fake socket (the port is known once the fake is up).
+  const ws = { get webSocketDebuggerUrl() { return fake.wsUrl; } };
+  const { t, p } = await startVim(agentOpts(home), { tabs }, [
+    Object.defineProperties({ id: 'T1', type: 'page', url: 'https://example.com/', title: 'One' }, Object.getOwnPropertyDescriptors(ws)),
+    Object.defineProperties({ id: 'T2', type: 'page', url: 'https://two.test/', title: 'Two' }, Object.getOwnPropertyDescriptors(ws)),
+  ]);
+  await until(() => methods(fake, 'Target.setDiscoverTargets').length >= 1);
+  t.stdin.write('/foo\r');
+  await until(() => lastStatus(t) === 'match 1/3');
+  const enables = methods(fake, 'Page.enable').length;
+  t.stdin.write('J');
+  await until(() => methods(fake, 'Page.enable').length > enables);
+  assert.equal(findClears().length, 1, 'find cleared on the old tab');
+  assert.equal(methods(fake, 'Target.activateTarget').length, 0);
+  t.stdin.write(':done\r');
+  await untilAsync(async () => !(await readControl('ag1', p0)).held);
+  const c = await readControl('ag1', p0);
+  assert.equal(c.lastTakeover.tabsChanged, true);
+  assert.equal(c.lastTakeover.url, 'https://two.test/');
+  t.signals.emit('SIGTERM');
+  assert.equal(await p, 0);
+});

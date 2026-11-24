@@ -487,7 +487,7 @@ test('view --agent ID passes that agent id to the viewer; --port on an agent por
   assert.deepEqual(seen.map((o) => o.port), [40011, 40011, 40012, 40013]);
   assert.deepEqual(seen.map((o) => o.control.agentId), ['ctl-agent', 'ctl-agent', null, null], 'only agent browsers are controlled');
   assert.equal(seen[0].control.idleReturnMs, 300_000);
-  assert.equal(seen[0].keys.prefix.label, 'Ctrl-]');
+  assert.ok(seen.every((o) => !('keys' in o)), 'no [keys] any more');
   assert.ok(seen.every((o) => o.interactive === true), 'interactive by default');
 });
 

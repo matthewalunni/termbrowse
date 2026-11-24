@@ -4,7 +4,7 @@ import { mkdtemp, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { paths } from '../src/paths.js';
-import { loadConfig, effectiveHeadless, parseKeySpec, parseDuration } from '../src/config.js';
+import { loadConfig, effectiveHeadless, parseDuration } from '../src/config.js';
 
 async function tmpFile(content) {
   const dir = await mkdtemp(join(tmpdir(), 'tb-'));
@@ -78,33 +78,48 @@ test('[chrome] background: default true, false honoured, non-boolean names the f
   await assert.rejects(loadConfig({ TERMBROWSE_CONFIG: bad }), (e) => e.message.includes(bad) && /background/.test(e.message));
 });
 
-test('[keys] and [control] defaults', async () => {
+test('[control] defaults; there is no keys section any more', async () => {
   const cfg = await loadConfig({ TERMBROWSE_CONFIG: '/nonexistent.toml' });
-  assert.deepEqual(cfg.keys.prefix, { key: ']', ctrl: true, alt: false, label: 'Ctrl-]' });
-  assert.equal(cfg.keys.giveBack.key, 'g');
-  assert.equal(cfg.keys.quit.key, 'q');
+  assert.equal(cfg.keys, undefined);
   assert.equal(cfg.control.idleReturnMs, 300000);
   assert.equal(cfg.control.maxWaitMs, 600000);
 });
 
-test('reads [keys] and [control] from toml', async () => {
-  const file = await tmpFile('[keys]\nprefix = "alt-x"\ngive_back = "f2"\n[control]\nidle_return = "90s"\nmax_wait = "2h"\n');
+test('reads [control] from toml', async () => {
+  const file = await tmpFile('[control]\nidle_return = "90s"\nmax_wait = "2h"\n');
   const cfg = await loadConfig({ TERMBROWSE_CONFIG: file });
-  assert.equal(cfg.keys.prefix.label, 'Alt-x');
-  assert.equal(cfg.keys.giveBack.key, 'F2');
   assert.equal(cfg.control.idleReturnMs, 90000);
   assert.equal(cfg.control.maxWaitMs, 7200000);
 });
 
-test('parseKeySpec', () => {
-  assert.deepEqual(parseKeySpec('alt-x'), { key: 'x', ctrl: false, alt: true, label: 'Alt-x' });
-  assert.equal(parseKeySpec('f2').key, 'F2');
-  assert.equal(parseKeySpec('F12').key, 'F12');
-  assert.equal(parseKeySpec('ESCAPE').key, 'Escape');
-  for (const n of ['tab', 'enter', 'space']) assert.equal(parseKeySpec(n).ctrl, false);
-  assert.deepEqual(parseKeySpec('ctrl-]'), { key: ']', ctrl: true, alt: false, label: 'Ctrl-]' });
-  assert.throws(() => parseKeySpec('f13'));
-  assert.throws(() => parseKeySpec('ab'));
+test('[keys] is retired: one warning however many old keys, and the config still loads', async () => {
+  const file = await tmpFile('[keys]\nprefix = "ctrl-]"\ngive_back = "g"\nquit = "q"\n[control]\nidle_return = "90s"\n');
+  const warnings = [];
+  const cfg = await loadConfig({ TERMBROWSE_CONFIG: file }, { warn: (m) => warnings.push(m) });
+  assert.deepEqual(warnings, ['termbrowse: [keys] is no longer used (vim mode); see README\n']);
+  assert.equal(cfg.control.idleReturnMs, 90000);
+  // Even a value the old parser rejected is only warned about now.
+  const bad = await tmpFile('[keys]\nprefix = "ctrl-"\n');
+  const w2 = [];
+  await loadConfig({ TERMBROWSE_CONFIG: bad }, { warn: (m) => w2.push(m) });
+  assert.equal(w2.length, 1);
+  const none = [];
+  await loadConfig({ TERMBROWSE_CONFIG: '/nonexistent.toml' }, { warn: (m) => none.push(m) });
+  assert.equal(none.length, 0);
+});
+
+test('[keys] warning goes to stderr once per process by default', async () => {
+  const file = await tmpFile('[keys]\nprefix = "ctrl-]"\n');
+  const write = process.stderr.write;
+  const seen = [];
+  process.stderr.write = (chunk, ...rest) => { seen.push(String(chunk)); return true; };
+  try {
+    await loadConfig({ TERMBROWSE_CONFIG: file });
+    await loadConfig({ TERMBROWSE_CONFIG: file });
+  } finally {
+    process.stderr.write = write;
+  }
+  assert.equal(seen.filter((s) => s.includes('[keys] is no longer used')).length, 1);
 });
 
 test('parseDuration', () => {
@@ -135,9 +150,8 @@ test('[view] interactive: default true, false read, a non-bool names the file', 
   await assert.rejects(loadConfig({ TERMBROWSE_CONFIG: bad }), (err) => err.message.includes(bad) && err.message.includes('interactive'));
 });
 
-test('invalid key or duration names the file', async () => {
-  const a = await tmpFile('[keys]\nprefix = "ctrl-"\n');
-  await assert.rejects(loadConfig({ TERMBROWSE_CONFIG: a }), (err) => err.message.includes(a) && err.message.includes('prefix'));
+test('invalid duration names the file', async () => {
   const b = await tmpFile('[control]\nidle_return = "5 minutes"\n');
   await assert.rejects(loadConfig({ TERMBROWSE_CONFIG: b }), (err) => err.message.includes(b) && err.message.includes('idle_return'));
 });
+

@@ -176,14 +176,14 @@ function tabsFake(pages) {
   });
 }
 
-test('tabs: next/prev activate the neighbour (wrapping), new creates, close keeps the last page', async () => {
+test('tabs: next/prev pick the neighbour (wrapping), new creates, close keeps the last page', async () => {
   const cdp = await tabsFake(['A', 'B', 'C']);
   const browser = await CdpSession.connect(cdp.wsUrl);
   const sent = (m) => cdp.received.filter((r) => r.method === m).map((r) => r.params);
   assert.deepEqual(await ops.tabs(browser, 'next', 'B'), { targetId: 'C' });
   assert.deepEqual(await ops.tabs(browser, 'next', 'C'), { targetId: 'A' });
   assert.deepEqual(await ops.tabs(browser, 'prev', 'A'), { targetId: 'C' });
-  assert.deepEqual(sent('Target.activateTarget').map((p) => p.targetId), ['C', 'A', 'C']);
+  assert.equal(sent('Target.activateTarget').length, 0, 'never brings a tab (or Chrome) to the front');
   assert.deepEqual(await ops.tabs(browser, 'new', 'A'), { targetId: 'NEW' });
   assert.equal(sent('Target.createTarget')[0].url, 'about:blank');
   assert.deepEqual(await ops.tabs(browser, 'close', 'B'), { targetId: 'C' }, 'like Chrome: the tab to the right');

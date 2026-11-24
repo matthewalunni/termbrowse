@@ -37,12 +37,16 @@ async function update(agentId, p, mutate) {
   });
 }
 
-const closed = (c, until, url) => ({
-  ...c, holder: null, viewerPid: null, lastTakeover: { since: c.since, until, url: url ?? c.url ?? null },
+// tabsChanged: the user switched, opened or closed tabs during the takeover (the agent must
+// re-select its page). Recorded on the holder record as it happens, so an idle release keeps it.
+const closed = (c, until, url, tabsChanged) => ({
+  ...c, holder: null, viewerPid: null, tabsChanged: false,
+  lastTakeover: { since: c.since, until, url: url ?? c.url ?? null, tabsChanged: !!(tabsChanged || c.tabsChanged) },
 });
 
-const taken = (c, { viewerPid, url, idleReturnMs }, now) => ({
+const taken = (c, { viewerPid, url, idleReturnMs, tabsChanged }, now) => ({
   ...c, holder: 'user', viewerPid, url, idleReturnMs, since: now, lastInput: now, takeovers: (c.takeovers ?? 0) + 1,
+  tabsChanged: !!tabsChanged,
 });
 
 export async function takeControl(agentId, { viewerPid, url, idleReturnMs }, p = paths()) {
@@ -57,14 +61,20 @@ export async function takeControl(agentId, { viewerPid, url, idleReturnMs }, p =
 
 // The viewer still holds control and the user acted. If the file was released under it (the
 // wrapper read it as idle, or it was removed), the user takes control again: a new takeover.
+// holder.tabsChanged: true marks the current takeover as having changed tabs.
 export const touchControl = (agentId, holder, p = paths()) => {
   const now = Date.now();
-  return update(agentId, p, (c) => (c.holder === 'user' ? { ...c, lastInput: now } : taken(c, holder, now)));
+  return update(agentId, p, (c) => (c.holder === 'user'
+    ? { ...c, lastInput: now, ...(holder.tabsChanged ? { tabsChanged: true } : {}) }
+    : taken(c, holder, now)));
 };
 
 // until: when the takeover ended (e.g. the last input, for an idle hand-back); default now.
-export const releaseControl = (agentId, { url, until } = {}, p = paths()) =>
-  update(agentId, p, (c) => (c.holder === 'user' ? closed(c, Math.max(until ?? Date.now(), c.since ?? 0), url) : null));
+// tabsChanged: the user changed tabs during the takeover (lastTakeover.tabsChanged).
+export const releaseControl = (agentId, { url, until, tabsChanged } = {}, p = paths()) =>
+  update(agentId, p, (c) => (c.holder === 'user'
+    ? closed(c, Math.max(until ?? Date.now(), c.since ?? 0), url, tabsChanged)
+    : null));
 
 export async function readControl(agentId, p = paths(), now = Date.now()) {
   const file = controlPath(agentId, p);
