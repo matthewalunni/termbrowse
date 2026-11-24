@@ -634,12 +634,12 @@ async function main() {
       const note = texts(r).find((tx) => tx.startsWith(NOTE_PREFIX));
       assert(note, `no takeover note: ${JSON.stringify(texts(r)).slice(0, 600)}`);
       assert(waited >= (IDLE_RETURN_S - 1) * 1000, `the call waited only ${waited} ms`);
-      const m = /for (\d+) s \(while you waited, (\d+) s\)\. Their last input was (\d+) s in; control came back automatically after (\d+) s with no input\. The page may have changed; it is now at (\S+)\. /.exec(note);
+      const m = /for (\d+) s \(while you waited, (\d+) s\)\. Their last input was (?:in the first second|(\d+) s in); control came back automatically after (\d+) s with no input\. The page may have changed; it is now at (\S+)\. /.exec(note);
       assert(m, `note doesn't describe an idle return: ${note}`);
       const [held, waitedS, active, idle] = m.slice(1, 5).map(Number);
       assert(held >= IDLE_RETURN_S && held <= IDLE_RETURN_S + 2, `hold ${held} s, expected about ${IDLE_RETURN_S} s`);
       assert(idle === IDLE_RETURN_S, `idle ${idle} s, expected ${IDLE_RETURN_S} s`);
-      assert(active <= 1, `last input ${active} s in, expected 1 s`);
+      assert(!(active > 1), `last input ${active} s in, expected within the first second`);
       assert(Math.abs(waitedS * 1000 - waited) <= 1500, `note says waited ${waitedS} s, measured ${waited} ms`);
       assert(m[5] === blueUrl, `note names ${m[5]}, not ${blueUrl}`);
       info(`call answered after ${waited} ms`);

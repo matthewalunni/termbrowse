@@ -1774,3 +1774,15 @@ test('interactive: a standalone browser on about:blank shows the URL as is', asy
   t.stdin.write(':q\r');
   assert.equal(await p, 0);
 });
+
+test('watch only on an agent browser at about:blank: the status row says blank page', async () => {
+  const home = await tmpHome();
+  fake = await startDrawing();
+  const t = fakeTerm({ cols: 100 });
+  const { p } = start(t, { ...agentOpts(home), interactive: false });
+  await until(() => count(t.out(), 'a=T,f=100') === 1);
+  fake.send({ method: 'Page.frameNavigated', params: { frame: { id: 'F', url: 'about:blank' } } });
+  await until(() => (lastStatus(t) ?? '').startsWith('agent · blank page · waiting for the agent · '));
+  t.stdin.write('q');
+  assert.equal(await p, 0);
+});

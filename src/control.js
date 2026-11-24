@@ -105,15 +105,17 @@ export async function readControl(agentId, p = paths(), now = Date.now()) {
   const c = await load(file);
   if (!c) return view(blank());
   if (!stale(c)) return view(c);
-  // Viewer gone or user idle: hand back. The user's part ended at the last input; an idle one
-  // came back idle_return after it, a dead viewer's at the last input (when it died is unknown).
+  // Viewer gone or user idle: hand back. The user's part ended at the last input. An idle one
+  // came back idle_return after it. A dead viewer's came back now (a waiting call polls every
+  // second, so that is about when it died), but no later than idle_return would have.
   let out = c;
   await update(agentId, p, (cur) => {
     const gone = !alive(cur.viewerPid);
+    const idleAt = cur.lastInput + cur.idleReturnMs;
     out = stale(cur)
       ? closed(cur, {
         until: cur.lastInput,
-        returnedAt: gone ? cur.lastInput : cur.lastInput + cur.idleReturnMs,
+        returnedAt: gone ? Math.min(now, idleAt) : idleAt,
         how: gone ? 'viewer-gone' : 'idle',
       })
       : cur;

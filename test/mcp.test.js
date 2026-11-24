@@ -368,7 +368,12 @@ test('takeoverNote: an idle return counts the whole hold and says when the last 
   );
   assert.match(
     takeoverNote({ durationMs: 7000, waited: false, url: 'u', how: 'viewer-gone', activeMs: 7000 }),
-    / for 7 s \(since your last action\)\. Their viewer closed without handing back; their last input was 7 s in\. The page/,
+    / for 7 s \(since your last action\)\. Their viewer closed without handing back\. Their last input was 7 s in\. The page/,
+  );
+  // A single click, then nothing: the last input was at the start, not "1 s in".
+  assert.match(
+    takeoverNote({ durationMs: 4000, waited: true, waitedMs: 4000, url: 'u', how: 'idle', activeMs: 60 }),
+    / for 4 s \(while you waited, 4 s\)\. Their last input was in the first second; control came back automatically after 4 s with no input\. /,
   );
 });
 
@@ -440,7 +445,8 @@ test('stale control from a dead viewer pid does not block', { skip, timeout: 120
   assert.ok(!r.error && !r.result.isError, JSON.stringify(r));
   const n = notes(r);
   assert.equal(n.length, 1, JSON.stringify(r));
-  assert.match(n[0], / for 4 s \(since your last action\)\. /);
+  // Held from since until the dead viewer was noticed (now); the last input was 4 s in.
+  assert.match(n[0], / for 5 s \(since your last action\)\. Their viewer closed without handing back\. Their last input was 4 s in\. /);
   assert.ok(n[0].includes(`now at ${await pageUrl('test-s')}. `), n[0]);
   w.child.stdin.end();
   assert.equal(await w.exit, 0);

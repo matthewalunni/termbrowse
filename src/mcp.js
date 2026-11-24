@@ -79,11 +79,13 @@ export const formatDuration = (ms) => {
 // last input was, so the agent knows the page sat untouched after it.
 export const takeoverNote = ({ durationMs, waited, waitedMs, url, tabsChanged, how = 'handback', activeMs }) => {
   const why = waited ? `while you waited${waitedMs ? `, ${formatDuration(waitedMs)}` : ''}` : 'since your last action';
+  const active = activeMs ?? durationMs;
+  const lastInput = active < 1000 ? 'Their last input was in the first second' : `Their last input was ${formatDuration(active)} in`;
   let ended = '';
   if (how === 'idle') {
-    ended = ` Their last input was ${formatDuration(activeMs ?? 0)} in; control came back automatically after ${formatDuration(durationMs - (activeMs ?? 0))} with no input.`;
+    ended = ` ${lastInput}; control came back automatically after ${formatDuration(durationMs - active)} with no input.`;
   } else if (how === 'viewer-gone') {
-    ended = ` Their viewer closed without handing back; their last input was ${formatDuration(activeMs ?? durationMs)} in.`;
+    ended = ` Their viewer closed without handing back. ${lastInput}.`;
   }
   return `Note from termbrowse: the user took control of this browser for ${formatDuration(durationMs)} (${why}).${ended}`
     + ` The page may have changed; it is now at ${url}. Re-check the page (e.g. take a snapshot) before continuing.`
