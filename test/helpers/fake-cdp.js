@@ -20,6 +20,7 @@ export async function startFakeCdp({ handlers = {}, targets, connectDelay } = {}
   });
   let port;
   let conns = 0;
+  const byConn = new Map();
   const wsUrl = () => `ws://127.0.0.1:${port}/devtools/page/fake`;
 
   server.on('request', (req, res) => {
@@ -39,6 +40,7 @@ export async function startFakeCdp({ handlers = {}, targets, connectDelay } = {}
   wss.on('connection', (ws) => {
     sockets.add(ws);
     const conn = ++conns; // which connection a message came on (received[i].conn)
+    byConn.set(conn, ws);
     ws.on('close', () => sockets.delete(ws));
     ws.on('message', async (data) => {
       const msg = JSON.parse(data.toString());
@@ -63,6 +65,10 @@ export async function startFakeCdp({ handlers = {}, targets, connectDelay } = {}
     handlers,
     send(msg) {
       for (const ws of sockets) ws.send(JSON.stringify(msg));
+    },
+    // Drop one connection (e.g. the page session of a tab being closed).
+    closeConn(conn) {
+      byConn.get(conn)?.close();
     },
     closeSockets() {
       for (const ws of sockets) ws.close();

@@ -66,6 +66,7 @@ const BUSY_NOTE_MS = 2000;
 const FAIL_NOTE_MS = 3000;
 const BUTTON_BITS = { left: 1, right: 2, middle: 4 };
 const MATCH_NOTE_MS = 3000;
+const GATE_MS = 2500; // longest a page check / hint pick / tab op holds key events
 const PAGE_CLEANUP_MS = 2100; // hint labels / find highlights on exit (pageops gives up after 2 s)
 
 // The vim-mode keys, for the help page (?, :help) and the README.
@@ -206,6 +207,7 @@ export async function runViewer({
   let helpShown = false;
   let tabsChanged = false; // the user changed tabs during this takeover
   let closingTab = null; // the tab id the user is closing (its socket closing is expected)
+  let pageDead = false; // the viewed tab was closed by x and the switch is still on its way
   let gone = false; // the browser went away: the status row says so
   let controlOps = Promise.resolve(); // control file writes, in order
   const statePaths = agentId ? paths(env) : null;
@@ -411,6 +413,7 @@ export async function runViewer({
     if (old !== next) await Promise.all([clearFill(), within(leavePage(), PAGE_CLEANUP_MS)]);
     if (closing) { if (old !== next) next.close(); return; }
     page = next;
+    pageDead = false;
     target = info;
     url = info.url ?? '';
     attachPage(next);
@@ -455,7 +458,13 @@ export async function runViewer({
         listed = await lookup(targetId);
         next = await CdpSession.connect(listed.wsUrl);
       } catch {
-        return; // keep the current page
+        // Keep the current page, unless it is the tab x just closed: then fall back like a
+        // closed tab (another page, or disconnected).
+        if (pageDead) {
+          pageDead = false;
+          onPageClosed();
+        } else if (closingTab === target.id) closingTab = null; // its close, when seen, falls back
+        return;
       }
       if (closing || seq !== latestSwitch) { next.close(); return; }
       // openerId: the tab to go back to when this one closes (the one viewed until now).
@@ -470,7 +479,12 @@ export async function runViewer({
   const onPageClosed = async () => {
     if (closing) return;
     const closed = target;
-    if (closed.id === closingTab) { closingTab = null; return; } // x: the tab op shows the next one
+    if (closed.id === closingTab) { // x: the tab op shows the next one
+      closingTab = null;
+      pageDead = true;
+      return;
+    }
+    pageDead = false;
     try {
       if (!(await browserVersion(port))) throw new Error('browser gone');
       const pages = (await listTargets(port)).filter((t) => t.type === 'page' && t.id !== closed.id);
@@ -649,7 +663,9 @@ export async function runViewer({
   const held = [];
   const gated = (work) => {
     const seq = ++gateSeq;
-    const g = (gate ?? Promise.resolve()).then(work).catch(() => {}).then(() => {
+    // Bounded: a page stuck on alert() never answers a click or a Target call, and keys
+    // (:q included) must not wait on it for ever.
+    const g = (gate ?? Promise.resolve()).then(() => within(Promise.resolve().then(work).catch(() => {}), GATE_MS)).then(() => {
       if (seq !== gateSeq) return; // a later check drains
       gate = null;
       drain();
@@ -962,7 +978,11 @@ export async function runViewer({
   const onEvent = (ev) => {
     if (closing) return;
     if (ev.type === 'key' || ev.type === 'paste') {
-      if (gate) held.push(ev); // a page check is running: its answer decides the mode first
+      // A page check is running: its answer decides the mode first. Ctrl-C outside Insert,
+      // with no keys before it still waiting, quits at once whatever the page is doing (keys
+      // already waiting keep their order; the wait is bounded by GATE_MS).
+      const ctrlC = ev.type === 'key' && ev.ctrl && !ev.alt && !ev.meta && ev.key.toLowerCase() === 'c';
+      if (gate && !(ctrlC && !held.length && modes.state().mode !== 'insert')) held.push(ev);
       else runActions(modes.handle(ev, Date.now()));
     } else if (ev.type === 'mouse' || ev.type === 'wheel') {
       if (helpShown) return; // nothing of the page is on screen

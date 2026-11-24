@@ -1465,6 +1465,7 @@ test('vim: hint labels are removed on every exit (Esc, Ctrl-C, idle hand back, S
   { // Esc
     const { t, p } = await startVim(agentOpts(home));
     await showHints(t);
+    await untilAsync(async () => (await readControl('ag1', p0)).held); // f took control
     t.stdin.write(ESC_KEY);
     await until(() => evals('removeHintsInPage').length === 1);
     await until(() => (lastStatus(t) ?? '').startsWith('NORMAL'));
@@ -1587,11 +1588,64 @@ test('vim: J switches tab without activating it in Chrome, clears find; the take
   await until(() => methods(fake, 'Page.enable').length > enables);
   assert.equal(findClears().length, 1, 'find cleared on the old tab');
   assert.equal(methods(fake, 'Target.activateTarget').length, 0);
+  await untilAsync(async () => (await readControl('ag1', p0)).held); // the take has landed
   t.stdin.write(':done\r');
   await untilAsync(async () => !(await readControl('ag1', p0)).held);
   const c = await readControl('ag1', p0);
   assert.equal(c.lastTakeover.tabsChanged, true);
   assert.equal(c.lastTakeover.url, 'https://two.test/');
+  t.signals.emit('SIGTERM');
+  assert.equal(await p, 0);
+});
+
+test('vim: a hint click the page never answers (alert) does not trap :q or Ctrl-C', async () => {
+  const home = await tmpHome();
+  const p0 = paths({ HOME: home });
+  const hang = (params) => (params.type === 'mouseReleased' ? new Promise(() => {}) : {});
+  for (const quit of [':q\r', '\x03']) {
+    fake = await startDrawing(1037, 1443, { handlers: { ...pageFake(), 'Input.dispatchMouseEvent': hang } });
+    const t = fakeTerm();
+    const { p } = start(t, agentOpts(home));
+    await until(() => count(t.out(), 'a=T,f=100') === 1);
+    t.stdin.write('f');
+    await until(() => lastStatus(t) === 'f: type a label');
+    t.stdin.write('s');
+    await until(() => mouse().some((m) => m.type === 'mouseReleased'));
+    const at = Date.now();
+    t.stdin.write(quit);
+    assert.equal(await p, 0);
+    const took = Date.now() - at;
+    if (quit === '\x03') assert.ok(took < 2000, `Ctrl-C waited ${took} ms`);
+    else assert.ok(took < 6000, `:q waited ${took} ms`);
+    assert.equal((await readControl('ag1', p0)).held, false, 'handed back');
+    await fake.close();
+  }
+});
+
+test('vim: x on a tab whose neighbour cannot be reached falls back to another tab', async () => {
+  const home = await tmpHome();
+  const ws = { get webSocketDebuggerUrl() { return fake.wsUrl; } };
+  const tab = (id, url) => Object.defineProperties({ id, type: 'page', url, title: id }, Object.getOwnPropertyDescriptors(ws));
+  const listed = [tab('T1', 'https://one.test/'), tab('T3', 'https://three.test/'),
+    { id: 'T2', type: 'page', url: 'https://two.test/', title: 'T2', webSocketDebuggerUrl: 'ws://127.0.0.1:1/devtools/page/T2' }];
+  const state = { tabs: [{ targetId: 'T1', type: 'page', url: 'https://one.test/' }, { targetId: 'T2', type: 'page', url: 'https://two.test/' }, { targetId: 'T3', type: 'page', url: 'https://three.test/' }] };
+  const handlers = {
+    ...pageFake(state),
+    'Target.closeTarget': ({ targetId }) => {
+      listed.splice(listed.findIndex((x) => x.id === targetId), 1);
+      fake.closeConn(methods(fake, 'Page.enable')[0].conn); // the closed tab's socket drops
+      return {};
+    },
+  };
+  fake = await startDrawing(1037, 1443, { handlers, targets: listed });
+  const t = fakeTerm({ cols: 120 });
+  let done = false;
+  const { p } = start(t, agentOpts(home));
+  p.then(() => { done = true; });
+  await until(() => count(t.out(), 'a=T,f=100') === 1 && methods(fake, 'Target.setDiscoverTargets').length >= 1);
+  t.stdin.write('x');
+  await until(() => (lastStatus(t) ?? '').includes('https://three.test/'));
+  assert.equal(done, false);
   t.signals.emit('SIGTERM');
   assert.equal(await p, 0);
 });
