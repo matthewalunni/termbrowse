@@ -8,14 +8,28 @@ The viewer is interactive: click, scroll, type and paste into the page from the 
 
 ## Install
 
-termbrowse is not on npm. Install it from a checkout (Node 22 or newer, macOS or Linux):
+termbrowse runs on macOS and Linux and needs Node 22 or newer. Pick one:
+
+```sh
+npm install -g termbrowse                      # with Node already installed
+brew install matthewalunni/tap/termbrowse      # Homebrew (macOS or Linux); brings its own Node
+```
+
+Then check the setup:
+
+```sh
+termbrowse doctor
+```
+
+To run without installing, use `npx termbrowse <command>` (for example `npx termbrowse doctor`). Claude Code users can also skip this step: the [plugin](#claude-code-plugin) runs termbrowse through `npx` when it isn't installed.
+
+From a checkout (for development):
 
 ```sh
 git clone git@github.com:matthewalunni/termbrowse.git
 cd termbrowse
 npm ci
 npm link          # puts `termbrowse` on your PATH
-termbrowse doctor
 ```
 
 Chrome for Testing downloads to `~/.cache/termbrowse` the first time something needs it (about 150 MB).
@@ -85,7 +99,7 @@ When the agent exits, its Chrome closes. If the MCP process is killed without cl
 
 ## Claude Code plugin
 
-This repository is also a Claude Code plugin. The plugin doesn't contain a copy of termbrowse: its MCP server runs the `termbrowse` command from your PATH, so install the CLI first (see [Install](#install)) and check that `termbrowse doctor` reports `termbrowse on PATH: ok`.
+This repository is also a Claude Code plugin. The plugin doesn't contain a copy of termbrowse: its MCP server runs the `termbrowse` command from your PATH, or `npx -y termbrowse` when it isn't there (that needs Node 22 or newer, and the first start downloads the package). Installing the CLI (see [Install](#install)) is still worth it: you need it for `termbrowse view`, and the MCP server starts faster. `termbrowse doctor` reports `termbrowse on PATH: ok` when the plugin will use it.
 
 Then add this repository as a marketplace and install the plugin:
 
