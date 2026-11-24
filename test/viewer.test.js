@@ -384,6 +384,41 @@ test('fill: switching tabs clears the old page and fits the new one', async () =
   assert.equal(methods(fake, CLEAR)[1].conn, methods(fake, SET)[1].conn);
 });
 
+test('fill on a large HiDPI pane: page has the image area aspect, image covers the whole area, clicks land inside', async () => {
+  // Like Chrome: frames come at the screencast's max size, metadata reports the emulated CSS size.
+  let set = null;
+  fake = await startFakeCdp({
+    handlers: {
+      [SET]: (params) => { set = params; return {}; },
+      'Page.startScreencast': (params) => {
+        setTimeout(() => fake.send({ method: 'Page.screencastFrame', params: {
+          data: fakePng(params.maxWidth, params.maxHeight), sessionId: 1,
+          metadata: { deviceWidth: set?.width, deviceHeight: set?.height },
+        } }), 10);
+        return {};
+      },
+    },
+  });
+  const t = fakeTerm();
+  Object.assign(t.size, { cols: 136, rows: 40, pxW: 136 * 18, pxH: 40 * 37 }); // area 2448 x 1443
+  const { p } = start(t, { fill: true, interactive: true });
+  await until(() => count(t.out(), 'a=T,f=100') === 1);
+  const { width, height, deviceScaleFactor } = methods(fake, SET)[0].params;
+  assert.equal(deviceScaleFactor, 1);
+  assert.ok(width <= 2000 && height <= 1600, `${width}x${height}`);
+  assert.ok(Math.abs(width / height / (2448 / 1443) - 1) < 0.01, `aspect ${width / height}`);
+  const [sc] = methods(fake, 'Page.startScreencast');
+  assert.deepEqual([sc.params.maxWidth, sc.params.maxHeight], [width, height]);
+  assert.match(t.out(), /a=T,f=100,i=\d,p=1,c=136,r=39,/);
+  click(t, 136, 39); // bottom-right image cell
+  await until(() => mouse().length === 2);
+  const [down] = mouse();
+  assert.ok(down.x > width - width / 136 && down.x < width, `x ${down.x} of ${width}`);
+  assert.ok(down.y > height - height / 39 && down.y < height, `y ${down.y} of ${height}`);
+  t.signals.emit('SIGTERM');
+  assert.equal(await p, 0);
+});
+
 test('fill off: the page size is never touched', async () => {
   fake = await startFakeCdp();
   const t = fakeTerm();

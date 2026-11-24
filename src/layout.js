@@ -16,12 +16,21 @@ export function fit(img, term) {
   return { cols, rows };
 }
 
+// The image area (cols x (rows-1) cells) in pixels, scaled down as a whole to fit 2000 x 1600,
+// so the frame size (and, with fill on, the page viewport) keeps the area's exact aspect.
 export function screencastSize(term) {
-  const cellH = term.pxH / term.rows;
+  const w = term.pxW;
+  const h = (term.pxH / term.rows) * Math.max(1, term.rows - 1);
+  const scale = Math.max(1, w / 2000, h / 1600);
   return {
-    maxWidth: Math.min(2000, Math.round(term.pxW)),
-    maxHeight: Math.min(1600, Math.round(cellH * Math.max(1, term.rows - 1))),
+    maxWidth: Math.max(1, Math.min(2000, Math.round(w / scale))),
+    maxHeight: Math.max(1, Math.min(1600, Math.round(h / scale))),
   };
+}
+
+// With fill on, the page has the image area's aspect, so the image covers all of it.
+export function fillPlace(term) {
+  return { cols: term.cols, rows: Math.max(1, term.rows - 1) };
 }
 
 // 1-based terminal cell -> CSS page coordinates (cell centre), or null outside the image.

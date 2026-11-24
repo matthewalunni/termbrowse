@@ -1,6 +1,6 @@
 // Live viewer: draws one Chrome tab's screencast into the terminal with Kitty graphics.
 import { pngSize, encodeFrame, deleteAll, deleteImage, enterScreen, leaveScreen } from './kitty.js';
-import { fit, screencastSize, saneSize, cellToPage } from './layout.js';
+import { fit, fillPlace, screencastSize, saneSize, cellToPage } from './layout.js';
 import { listTargets, browserVersion, pickTarget, CdpSession } from './cdp.js';
 import { termSize, detectKitty, knownKittyTerminal } from './tty.js';
 import { InputParser } from './input.js';
@@ -239,7 +239,8 @@ export async function runViewer({
     let fitted;
     try {
       size = pngSize(data);
-      fitted = fit(size, term);
+      // Fill: the page was laid out at the image area's aspect, so the image takes all of it.
+      fitted = filled ? fillPlace(term) : fit(size, term);
       frame = encodeFrame(data, fitted, shownId === 1 ? 2 : 1);
     } catch {
       return; // not a PNG we can read
