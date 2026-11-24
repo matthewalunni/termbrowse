@@ -6,7 +6,7 @@ import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { paths } from '../src/paths.js';
 import {
-  controlPath, takeControl, touchControl, releaseControl, readControl, setAgentBusy, removeControl,
+  controlPath, takeControl, touchControl, releaseControl, readControl, setAgentBusy,
 } from '../src/control.js';
 
 async function tmpPaths() {
@@ -15,6 +15,8 @@ async function tmpPaths() {
 }
 const take = (p, over = {}) =>
   takeControl('a1', { viewerPid: process.pid, url: 'https://a.test/', idleReturnMs: 300_000, ...over }, p);
+const touch = (p, over = {}) =>
+  touchControl('a1', { viewerPid: process.pid, url: 'https://a.test/', idleReturnMs: 300_000, ...over }, p);
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 test('take then read is held with one takeover; taking again while held does not count', async () => {
@@ -76,9 +78,38 @@ test('touchControl keeps a held control from going idle', async () => {
   const p = await tmpPaths();
   await take(p, { idleReturnMs: 150 });
   await sleep(100);
-  await touchControl('a1', p);
+  await touch(p);
   await sleep(100);
   assert.equal((await readControl('a1', p)).held, true);
+});
+
+test('touchControl retakes a control that was released under the holder (idle or dead pid read)', async () => {
+  const p = await tmpPaths();
+  await take(p, { idleReturnMs: 50 });
+  await sleep(80);
+  assert.equal((await readControl('a1', p)).held, false); // the wrapper's read released it
+  await touch(p, { url: 'https://again.test/' });
+  const c = await readControl('a1', p);
+  assert.equal(c.held, true);
+  assert.equal(c.takeovers, 2);
+  const raw = JSON.parse(await fs.readFile(controlPath('a1', p), 'utf8'));
+  assert.equal(raw.viewerPid, process.pid);
+  assert.equal(raw.url, 'https://again.test/');
+  assert.equal(raw.idleReturnMs, 300_000);
+  assert.ok(Date.now() - raw.since < 1000 && raw.lastInput >= raw.since);
+});
+
+test('releaseControl until: the takeover ends then, not at the release', async () => {
+  const p = await tmpPaths();
+  await take(p);
+  const { since } = JSON.parse(await fs.readFile(controlPath('a1', p), 'utf8'));
+  await sleep(120);
+  await releaseControl('a1', { url: 'u', until: since + 10 }, p);
+  assert.equal((await readControl('a1', p)).lastTakeover.until, since + 10);
+  await take(p);
+  await releaseControl('a1', { url: 'u', until: 0 }, p); // never before it began
+  const t = (await readControl('a1', p)).lastTakeover;
+  assert.equal(t.until, t.since);
 });
 
 test('agent busy flag sets and clears', async () => {
@@ -97,15 +128,6 @@ test('busy flag survives take and release', async () => {
   assert.equal(typeof (await readControl('a1', p)).agentBusySince, 'number');
 });
 
-test('removeControl deletes the file', async () => {
-  const p = await tmpPaths();
-  await take(p);
-  await removeControl('a1', p);
-  await assert.rejects(fs.access(controlPath('a1', p)));
-  assert.equal((await readControl('a1', p)).held, false);
-  await removeControl('a1', p); // idempotent
-});
-
 test('control dir is private and ids cannot escape it', async () => {
   const p = await tmpPaths();
   const f = controlPath('../x', p);
@@ -119,7 +141,7 @@ test('concurrent touches and busy updates lose nothing', async () => {
   const p = await tmpPaths();
   await take(p);
   await Promise.all([
-    ...Array.from({ length: 10 }, () => touchControl('a1', p)),
+    ...Array.from({ length: 10 }, () => touch(p)),
     setAgentBusy('a1', true, p),
   ]);
   const c = await readControl('a1', p);

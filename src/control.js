@@ -41,21 +41,30 @@ const closed = (c, until, url) => ({
   ...c, holder: null, viewerPid: null, lastTakeover: { since: c.since, until, url: url ?? c.url ?? null },
 });
 
+const taken = (c, { viewerPid, url, idleReturnMs }, now) => ({
+  ...c, holder: 'user', viewerPid, url, idleReturnMs, since: now, lastInput: now, takeovers: (c.takeovers ?? 0) + 1,
+});
+
 export async function takeControl(agentId, { viewerPid, url, idleReturnMs }, p = paths()) {
   await ensureStateDir(p);
   const now = Date.now();
   await update(agentId, p, (c) => {
     const heldNow = c.holder === 'user' && alive(c.viewerPid) && now - c.lastInput <= c.idleReturnMs;
     if (heldNow) return { ...c, viewerPid, url, idleReturnMs, lastInput: now };
-    return { ...c, holder: 'user', viewerPid, url, idleReturnMs, since: now, lastInput: now, takeovers: c.takeovers + 1 };
+    return taken(c, { viewerPid, url, idleReturnMs }, now);
   });
 }
 
-export const touchControl = (agentId, p = paths()) =>
-  update(agentId, p, (c) => (c.holder === 'user' ? { ...c, lastInput: Date.now() } : null));
+// The viewer still holds control and the user acted. If the file was released under it (the
+// wrapper read it as idle, or it was removed), the user takes control again: a new takeover.
+export const touchControl = (agentId, holder, p = paths()) => {
+  const now = Date.now();
+  return update(agentId, p, (c) => (c.holder === 'user' ? { ...c, lastInput: now } : taken(c, holder, now)));
+};
 
-export const releaseControl = (agentId, { url } = {}, p = paths()) =>
-  update(agentId, p, (c) => (c.holder === 'user' ? closed(c, Date.now(), url) : null));
+// until: when the takeover ended (e.g. the last input, for an idle hand-back); default now.
+export const releaseControl = (agentId, { url, until } = {}, p = paths()) =>
+  update(agentId, p, (c) => (c.holder === 'user' ? closed(c, Math.max(until ?? Date.now(), c.since ?? 0), url) : null));
 
 export async function readControl(agentId, p = paths(), now = Date.now()) {
   const file = controlPath(agentId, p);
@@ -78,6 +87,3 @@ export async function readControl(agentId, p = paths(), now = Date.now()) {
 
 export const setAgentBusy = (agentId, busy, p = paths()) =>
   update(agentId, p, (c) => ({ ...c, agentBusySince: busy ? Date.now() : null }));
-
-export const removeControl = (agentId, p = paths()) =>
-  withLock(p, () => fs.unlink(controlPath(agentId, p)).catch((e) => { if (e.code !== 'ENOENT') throw e; }));
