@@ -69,5 +69,12 @@ test('matchesSpec', () => {
 test('matchesSpec compares ctrl letters case-insensitively', () => {
   assert.equal(matchesSpec({ key: 'a', ctrl: true }, parseKeySpec('ctrl-A')), true);
   assert.equal(matchesSpec({ key: 'A', ctrl: true }, parseKeySpec('ctrl-a')), true);
-  assert.equal(matchesSpec({ key: 'G' }, parseKeySpec('g')), false);
+});
+
+test('matchesSpec: a lowercase letter spec matches either case (Caps Lock); an uppercase one only itself', () => {
+  assert.equal(matchesSpec({ key: 'G' }, parseKeySpec('g')), true);
+  assert.equal(matchesSpec({ key: 'Q', shift: true }, parseKeySpec('q')), true);
+  assert.equal(matchesSpec({ key: 'G' }, parseKeySpec('G')), true);
+  assert.equal(matchesSpec({ key: 'g' }, parseKeySpec('G')), false);
+  assert.equal(matchesSpec({ key: 'h' }, parseKeySpec('g')), false);
 });

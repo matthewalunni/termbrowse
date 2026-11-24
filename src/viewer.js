@@ -2,7 +2,7 @@
 import { pngSize, encodeFrame, deleteAll, deleteImage, enterScreen, leaveScreen } from './kitty.js';
 import { fit, screencastSize, saneSize, cellToPage } from './layout.js';
 import { listTargets, browserVersion, pickTarget, CdpSession } from './cdp.js';
-import { termSize, detectKitty } from './tty.js';
+import { termSize, detectKitty, knownKittyTerminal } from './tty.js';
 import { InputParser } from './input.js';
 import { toKeyEvents, isPrintable, matchesSpec } from './keymap.js';
 import { parseKeySpec } from './config.js';
@@ -44,13 +44,21 @@ export function followable(info) {
 const RESIZE_DEBOUNCE_MS = 150;
 
 // Interactive mode: SGR any-event mouse, bracketed paste, then Kitty keyboard flags pushed
-// (1 disambiguate + 4 alternate keys + 8 all keys as escapes + 16 associated text = 29).
+// (1 disambiguate + 4 alternate keys + 8 all keys as escapes + 16 associated text = 29), focus
+// reporting, and a query of the keyboard flags (a terminal that answers speaks the protocol).
 // Kitty keeps a keyboard-flag stack per screen, so it is pushed on the alternate screen and
 // popped before leaving it.
-export const MODES_ON = `${ESC}[?1003h${ESC}[?1006h${ESC}[?2004h${ESC}[>29u`;
-export const MODES_OFF = `${ESC}[<u${ESC}[?2004l${ESC}[?1003l${ESC}[?1006l`;
+export const MODES_ON = `${ESC}[?1003h${ESC}[?1006h${ESC}[?2004h${ESC}[>29u${ESC}[?1004h${ESC}[?u`;
+export const MODES_OFF = `${ESC}[<u${ESC}[?1004l${ESC}[?2004l${ESC}[?1003l${ESC}[?1006l`;
 const DEFAULT_KEYS = { prefix: parseKeySpec('ctrl-]'), giveBack: parseKeySpec('g'), quit: parseKeySpec('q') };
-const ESC_FLUSH_MS = 50; // a lone ESC this long is the Escape key, not the start of a sequence
+const FOCUS_CLICK_MS = 150; // a press this soon after the terminal gains focus only focused the pane
+
+// How long a lone ESC waits before it counts as the Escape key rather than the start of a
+// sequence. With the Kitty keyboard protocol Escape itself arrives as a sequence, so a bare ESC
+// is always a split sequence: wait long. Over ssh sequences split more often.
+export function escFlushMs({ kittyKeyboard = false, env = {} } = {}) {
+  return kittyKeyboard || env.SSH_CONNECTION ? 300 : 50;
+}
 const PREFIX_MS = 2000;
 const CLICK_MS = 400; // double/triple click window
 const HOVER_MS = 1000 / 30; // at most 30 pointer moves a second
@@ -128,7 +136,12 @@ export async function runViewer({
   const parser = new InputParser();
   let escTimer = null;
   let prefixTimer = null; // set while the prefix key is armed
-  let hadInput = false; // q and Ctrl-C quit until the first input; afterwards they go to the page
+  let hadInput = false; // q and Ctrl-C quit until the first input (or a hand back); afterwards they go to the page
+  let lastInputAt = 0;
+  let kittyKeyboard = knownKittyTerminal(env); // a bare ESC never means the Escape key
+  let focusKnown = false; // the terminal reports focus (?1004); until it does, assume focused
+  let focused = true;
+  let focusInAt = -Infinity;
   let holding = false; // the user holds control of the agent's browser
   let lastTouch = 0;
   let idleTimer = null;
@@ -152,17 +165,21 @@ export async function runViewer({
     while (drawn.length && now - drawn[0] > 1000) drawn.shift();
   };
 
+  // How to quit, always shown. Watch only: q (and Ctrl-C) quit without the prefix.
+  const quitHint = ` · ${interactive ? `${keys.prefix.label} ${keys.quit.label}` : 'q'} quit`;
   const statusText = (suffix) => {
     const width = Math.max(0, term.cols);
     if (note && note.until > Date.now()) return note.text.slice(0, width);
     if (prefixTimer) return 'prefix…'.slice(0, width);
     if (holding && confirmed) return `you have control · ${keys.prefix.label} ${keys.giveBack.label} to hand back`.slice(0, width);
+    // The URL shrinks first; past that the rest is cut before the quit hint is.
+    const fitted = (row) => (row.length + quitHint.length <= width ? row : row.slice(0, Math.max(0, width - quitHint.length))) + quitHint;
     if (agentId) {
-      const room = Math.max(0, width - suffix.length - 'agent ·  · '.length);
-      return `agent · ${url.slice(0, room)} · ${suffix}`.slice(0, width);
+      const room = Math.max(0, width - suffix.length - quitHint.length - 'agent ·  · '.length);
+      return fitted(`agent · ${url.slice(0, room)} · ${suffix}`).slice(0, width);
     }
-    const room = Math.max(0, width - suffix.length - 2);
-    return `${url.slice(0, room)}  ${suffix}`.slice(0, width);
+    const room = Math.max(0, width - suffix.length - quitHint.length - 2);
+    return fitted(`${url.slice(0, room)}  ${suffix}`).slice(0, width);
   };
   const statusSeq = (text) => `${ESC}[${term.rows};1H${ESC}[2K${text}`;
   const setStatus = (suffix, force = false) => {
@@ -277,14 +294,26 @@ export async function runViewer({
       await Promise.all([clearFill(), new Promise((r) => setTimeout(r, 1000))]);
     }
     await within(controlOps, 1000);
-    stdout.write((interactive ? MODES_OFF : '') + leaveScreen());
-    if (typeof stdin.setRawMode === 'function' && !!stdin.isRaw !== wasRaw) stdin.setRawMode(wasRaw);
+    restoreTerminal();
     if (!wasFlowing) stdin.pause();
     page.close();
     browser?.close();
     stdout.off('error', onStdoutError);
     onExit?.(code);
     resolveRun(code);
+  };
+
+  // Terminal modes off and the normal screen back: once, from finish, or as a last resort when
+  // the process exits without finish having got this far (a throw, process.exit elsewhere).
+  let restored = false;
+  const restoreTerminal = () => {
+    if (restored) return;
+    restored = true;
+    signals.removeListener('exit', restoreTerminal);
+    try {
+      stdout.write((interactive ? MODES_OFF : '') + leaveScreen());
+      if (typeof stdin.setRawMode === 'function' && !!stdin.isRaw !== wasRaw) stdin.setRawMode(wasRaw);
+    } catch { /* the terminal is gone */ }
   };
 
   const attachPage = (session) => {
@@ -413,12 +442,12 @@ export async function runViewer({
 
   // Release in the file, retrying once; a failure is shown (the agent stays blocked until this
   // viewer exits, when its dead pid releases it).
-  const release = (at) => queueControl(async () => {
+  const release = (at, until) => queueControl(async () => {
     try {
-      await releaseControl(agentId, { url: at }, statePaths);
+      await releaseControl(agentId, { url: at, until }, statePaths);
     } catch {
       try {
-        await releaseControl(agentId, { url: at }, statePaths);
+        await releaseControl(agentId, { url: at, until }, statePaths);
       } catch (err) {
         flash(`couldn't hand back control: ${err.message}`, FAIL_NOTE_MS);
       }
@@ -426,13 +455,16 @@ export async function runViewer({
   });
 
   let takeSeq = 0; // which take a result belongs to (a give-back may come before it lands)
-  const giveBack = () => {
+  // Hand control back (prefix + give_back, or idle; until: when the takeover ended) and return
+  // to watching: q and Ctrl-C quit again until the next input.
+  const giveBack = (until) => {
     clearTimeout(idleTimer);
+    hadInput = false;
     if (!holding) return;
     holding = false;
     confirmed = false;
     takeSeq++;
-    release(url);
+    release(url, until);
     showStatus();
   };
 
@@ -440,10 +472,12 @@ export async function runViewer({
   // control (the input itself is sent at once, not after the file write).
   const acted = () => {
     hadInput = true;
-    if (!agentId) return;
     const now = Date.now();
+    lastInputAt = now;
+    if (!agentId) return;
     clearTimeout(idleTimer);
-    idleTimer = setTimeout(giveBack, idleReturnMs);
+    // Idle: the takeover ended at the last input, not after the wait.
+    idleTimer = setTimeout(() => giveBack(lastInputAt), idleReturnMs);
     if (!holding) {
       holding = true;
       confirmed = false;
@@ -469,7 +503,7 @@ export async function runViewer({
       });
     } else if (now - lastTouch >= TOUCH_MS) {
       lastTouch = now;
-      queueControl(() => touchControl(agentId, statePaths));
+      queueControl(() => touchControl(agentId, { viewerPid: process.pid, url, idleReturnMs }, statePaths));
     }
   };
 
@@ -511,6 +545,9 @@ export async function runViewer({
       return;
     }
     if (ev.action === 'press') {
+      // The click that focused the pane is not meant for the page (nor is its release: the page
+      // never saw the press).
+      if (Date.now() - focusInAt < FOCUS_CLICK_MS) return;
       const at = pageAt(ev.col, ev.row);
       if (!at) return;
       acted();
@@ -542,6 +579,7 @@ export async function runViewer({
   };
 
   const onWheel = (ev) => {
+    if (focusKnown && !focused) return; // a scroll over an unfocused pane
     const at = pageAt(ev.col, ev.row);
     if (!at) return;
     acted();
@@ -589,7 +627,7 @@ export async function runViewer({
       showStatus();
       return;
     }
-    if (!hadInput && (matchesSpec(ev, { key: 'q' }) || matchesSpec(ev, { key: 'c', ctrl: true }))) {
+    if (!hadInput && (matchesSpec(ev, keys.quit) || matchesSpec(ev, { key: 'c', ctrl: true }))) {
       finish(0);
       return;
     }
@@ -602,7 +640,12 @@ export async function runViewer({
     else if (ev.type === 'mouse') onMouse(ev);
     else if (ev.type === 'wheel') onWheel(ev);
     else if (ev.type === 'paste') insertText(ev.text);
-    // 'reply': size and Kitty replies are read by the query in flight (tty.js) from the same stdin.
+    else if (ev.type === 'focus') {
+      focusKnown = true;
+      focused = ev.in;
+      if (ev.in) focusInAt = Date.now();
+    } else if (ev.type === 'reply' && /^\x1b\[\?\d*u$/.test(ev.raw)) kittyKeyboard = true; // keyboard flags reply
+    // Other replies: size and Kitty replies are read by the query in flight (tty.js) from the same stdin.
   };
 
   const onKey = (chunk) => {
@@ -617,7 +660,7 @@ export async function runViewer({
       escTimer = setTimeout(() => {
         escTimer = null;
         for (const ev of parser.flush()) onEvent(ev);
-      }, ESC_FLUSH_MS);
+      }, escFlushMs({ kittyKeyboard, env }));
     }
   };
 
@@ -634,6 +677,7 @@ export async function runViewer({
   stdin.on('data', onKey);
   stdin.resume();
   for (const [sig, fn] of sigHandlers) signals.on(sig, fn);
+  signals.on('exit', restoreTerminal);
   const ticker = setInterval(() => { if (!paused && !closing) setStatus(fpsSuffix()); }, 1000);
   ticker.unref?.();
 

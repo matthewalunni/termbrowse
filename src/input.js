@@ -1,4 +1,4 @@
-// Parses raw terminal input (stdin bytes) into mouse, wheel, key, paste and terminal-reply events.
+// Parses raw terminal input (stdin bytes) into mouse, wheel, key, paste, focus and terminal-reply events.
 // Pure: no I/O. Incomplete sequences are kept between pushes; a lone ESC stays pending until
 // flush(), which the caller runs on a short timer to tell the Escape key from a sequence start.
 import { StringDecoder } from 'node:string_decoder';
@@ -119,7 +119,8 @@ function csiEvent(params, final, raw) {
     return mods.release ? null : keyEvent(FINAL_KEYS[final], mods);
   }
   if (final === 'Z') return keyEvent('Tab', { shift: true });
-  return null; // focus events and anything else we don't use
+  if (params === '' && (final === 'I' || final === 'O')) return { type: 'focus', in: final === 'I' }; // focus reporting (?1004)
+  return null; // anything else we don't use
 }
 
 export class InputParser {

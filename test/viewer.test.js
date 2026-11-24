@@ -2,7 +2,7 @@ import { test, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
 import { PassThrough } from 'node:stream';
-import { runViewer, nextEveryNth, keyQuits, followable } from '../src/viewer.js';
+import { runViewer, nextEveryNth, keyQuits, followable, escFlushMs, MODES_OFF } from '../src/viewer.js';
 import { kittyQuery, leaveScreen, deleteAll } from '../src/kitty.js';
 import { startFakeCdp } from './helpers/fake-cdp.js';
 import fs from 'node:fs/promises';
@@ -10,6 +10,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { cellToPage, fit } from '../src/layout.js';
 import { paths } from '../src/paths.js';
+import { parseKeySpec } from '../src/config.js';
 import { controlPath, readControl, setAgentBusy } from '../src/control.js';
 
 const ESC = '\x1b';
@@ -675,7 +676,7 @@ test('frames alternate image ids 1,2,1; the new image is placed before the previ
     assert.ok(w.indexOf('a=T,f=100') < w.indexOf(`a=d,d=I,i=${prev}`), `frame ${i + 1} deletes image ${prev} after placing`);
     assert.equal(count(w, 'a=d'), 1);
     assert.ok(w.indexOf(`a=d,d=I,i=${prev}`) < w.indexOf(`${ESC}[40;1H`), 'status row still last');
-    assert.ok(w.endsWith(w.slice(w.indexOf(`${ESC}[40;1H`))) && /\x1b\[40;1H\x1b\[2K.* fps$/.test(w));
+    assert.ok(w.endsWith(w.slice(w.indexOf(`${ESC}[40;1H`))) && /\x1b\[40;1H\x1b\[2K.* fps · Ctrl-] q quit$/.test(w));
   }
   t.stdin.write('q');
   assert.equal(await p, 0);
@@ -749,7 +750,8 @@ test('interactive: enables mouse, paste and Kitty keyboard on start and restores
   t.stdin.write('q');
   assert.equal(await p, 0);
   const tail = t.out().slice(t.out().lastIndexOf(MODES_ON));
-  for (const off of [`${ESC}[<u`, `${ESC}[?1003l`, `${ESC}[?1006l`, `${ESC}[?2004l`]) assert.ok(tail.includes(off), `missing ${JSON.stringify(off)}`);
+  assert.ok(t.out().includes(`${ESC}[?1004h`), 'focus reporting on');
+  for (const off of [`${ESC}[<u`, `${ESC}[?1003l`, `${ESC}[?1006l`, `${ESC}[?2004l`, `${ESC}[?1004l`]) assert.ok(tail.includes(off), `missing ${JSON.stringify(off)}`);
   assert.ok(tail.indexOf(`${ESC}[<u`) < tail.indexOf(`${ESC}[?1049l`), 'Kitty keyboard popped before leaving the alternate screen');
   assert.ok(t.out().endsWith(leaveScreen()));
 });
@@ -1048,6 +1050,193 @@ test('watch only (interactive: false): no modes, q quits after other keys', asyn
   assert.equal(await p, 0);
   assert.ok(!t.out().includes(`${ESC}[?1003h`));
   assert.equal(methods(fake, 'Input.dispatchMouseEvent').length + methods(fake, 'Input.dispatchKeyEvent').length, 0);
+});
+
+// --- final-review fixes ---
+const lastStatus = (t) => {
+  const all = [...t.out().matchAll(new RegExp(`${ESC}\\[${t.size.rows};1H${ESC}\\[2K([^\\x1b]*)`, 'g'))];
+  return all.at(-1)?.[1];
+};
+
+test('interactive: after handing back, q and Ctrl-C quit again (nothing to the page, no new takeover)', async () => {
+  const home = await tmpHome();
+  const p0 = paths({ HOME: home });
+  const { t, p } = await startInteractive(agentOpts(home));
+  click(t, 10, 5);
+  await untilAsync(async () => (await readControl('ag1', p0)).held);
+  t.stdin.write('\x1dg');
+  await untilAsync(async () => !(await readControl('ag1', p0)).held);
+  t.stdin.write('q');
+  assert.equal(await p, 0);
+  assert.equal(keyDowns().length, 0);
+  const c = await readControl('ag1', p0);
+  assert.equal(c.held, false);
+  assert.equal(c.takeovers, 1);
+});
+
+test('interactive: status rows always say how to quit', async () => {
+  const home = await tmpHome();
+  {
+    const { t, p } = await startInteractive();
+    await until(() => /https:\/\/example\.com\/  \d+ fps · Ctrl-] q quit$/.test(lastStatus(t) ?? ''));
+    t.signals.emit('SIGTERM');
+    assert.equal(await p, 0);
+    await fake.close();
+  }
+  {
+    const { t, p } = await startInteractive(agentOpts(home));
+    await until(() => /^agent · https:\/\/example\.com\/ · \d+ fps · Ctrl-] q quit$/.test(lastStatus(t) ?? ''));
+    t.signals.emit('SIGTERM');
+    assert.equal(await p, 0);
+    await fake.close();
+  }
+  {
+    // Custom keys are named; a narrow pane shortens the URL, never past the width.
+    fake = await startDrawing();
+    const t = fakeTerm();
+    t.size.cols = 30;
+    t.size.pxW = 30 * 17;
+    const { p } = start(t, { ...agentOpts(home), keys: { prefix: parseKeySpec('ctrl-a'), giveBack: parseKeySpec('g'), quit: parseKeySpec('x') } });
+    await until(() => count(t.out(), 'a=T,f=100') === 1 && (lastStatus(t) ?? '').startsWith('agent · '));
+    const row = lastStatus(t);
+    assert.ok(row.length <= 30, row);
+    assert.equal(row.length, 30, row);
+    assert.match(row, /^agent · .* · Ctrl-a x quit$/);
+    t.signals.emit('SIGTERM');
+    assert.equal(await p, 0);
+  }
+});
+
+test('watch only: the status row says q quits', async () => {
+  fake = await startDrawing();
+  const t = fakeTerm();
+  const { p } = start(t, { interactive: false });
+  await until(() => /https:\/\/example\.com\/  \d+ fps · q quit$/.test(lastStatus(t) ?? ''));
+  t.stdin.write('q');
+  assert.equal(await p, 0);
+});
+
+test('interactive: the click that focuses the pane is not delivered and takes no control', async () => {
+  const home = await tmpHome();
+  const p0 = paths({ HOME: home });
+  const { t, p } = await startInteractive(agentOpts(home));
+  t.stdin.write(`${ESC}[I`);
+  click(t, 10, 5);
+  await sleep(100);
+  assert.equal(mouse().length, 0);
+  await assert.rejects(fs.access(controlPath('ag1', p0)));
+  await sleep(100); // 200 ms after the focus-in: a real click
+  click(t, 10, 5);
+  await until(() => mouse().length === 2);
+  assert.deepEqual(mouse().map((m) => m.type), ['mousePressed', 'mouseReleased']);
+  await untilAsync(async () => (await readControl('ag1', p0)).held);
+  t.signals.emit('SIGTERM');
+  assert.equal(await p, 0);
+});
+
+test('interactive: wheel while the terminal reports focus out is ignored', async () => {
+  const home = await tmpHome();
+  const { t, p } = await startInteractive(agentOpts(home));
+  t.stdin.write(`${ESC}[O`);
+  t.stdin.write(`${ESC}[<65;10;5M`);
+  await sleep(100);
+  assert.equal(mouse().length, 0);
+  await assert.rejects(fs.access(controlPath('ag1', paths({ HOME: home }))));
+  t.stdin.write(`${ESC}[I`);
+  t.stdin.write(`${ESC}[<65;10;5M`);
+  await until(() => mouse().length === 1);
+  assert.equal(mouse()[0].type, 'mouseWheel');
+  t.signals.emit('SIGTERM');
+  assert.equal(await p, 0);
+});
+
+test('watch only (interactive: false) on an agent browser: no modes, clicks and keys never take control', async () => {
+  const home = await tmpHome();
+  fake = await startDrawing();
+  const t = fakeTerm();
+  const { p } = start(t, { ...agentOpts(home), interactive: false });
+  await until(() => count(t.out(), 'a=T,f=100') === 1);
+  t.stdin.write(`${ESC}[<0;10;5M${ESC}[<0;10;5mab`);
+  await sleep(100);
+  t.stdin.write('q');
+  assert.equal(await p, 0);
+  for (const mode of ['?1003h', '?1006h', '?2004h', '>29u', '?1004h']) assert.ok(!t.out().includes(`${ESC}[${mode}`), mode);
+  assert.equal(mouse().length + keyDowns().length, 0);
+  await assert.rejects(fs.access(controlPath('ag1', paths({ HOME: home }))));
+});
+
+test('interactive: idle hand back ends the takeover at the last input, not after the wait', async () => {
+  const home = await tmpHome();
+  const p0 = paths({ HOME: home });
+  const { t, p } = await startInteractive(agentOpts(home, { idleReturnMs: 400 }));
+  click(t, 10, 5);
+  const raw = () => fs.readFile(controlPath('ag1', p0), 'utf8').then(JSON.parse);
+  await untilAsync(async () => (await raw()).holder === 'user');
+  await untilAsync(async () => (await raw()).holder === null, 2000);
+  const { since, until: end } = (await raw()).lastTakeover;
+  assert.ok(end - since < 200, `takeover lasted ${end - since} ms`);
+  t.stdin.write('q'); // back to watching
+  assert.equal(await p, 0);
+});
+
+test('interactive: reserved letters match either case (Caps Lock); the pre-input quit is keys.quit', async () => {
+  const home = await tmpHome();
+  const p0 = paths({ HOME: home });
+  const { t, p } = await startInteractive(agentOpts(home));
+  click(t, 10, 5);
+  await untilAsync(async () => (await readControl('ag1', p0)).held);
+  t.stdin.write('\x1dG');
+  await untilAsync(async () => !(await readControl('ag1', p0)).held);
+  t.stdin.write('Q');
+  assert.equal(await p, 0);
+  assert.equal(keyDowns().length, 0);
+  await fake.close();
+
+  const v = await startInteractive({ keys: { prefix: parseKeySpec('ctrl-]'), giveBack: parseKeySpec('g'), quit: parseKeySpec('x') } });
+  v.t.stdin.write('x');
+  assert.equal(await v.p, 0);
+  assert.equal(keyDowns().length, 0);
+});
+
+test('escFlushMs: long with the Kitty keyboard protocol or over ssh, short otherwise', () => {
+  assert.equal(escFlushMs({ kittyKeyboard: true, env: {} }), 300);
+  assert.equal(escFlushMs({ kittyKeyboard: false, env: {} }), 50);
+  assert.equal(escFlushMs({ kittyKeyboard: false, env: { SSH_CONNECTION: '1 2 3 4' } }), 300);
+});
+
+test('interactive: a lone ESC waits 300 ms once the terminal acknowledges the Kitty keyboard protocol', async () => {
+  const { t, p } = await startInteractive();
+  t.stdin.write(ESC);
+  await until(() => keyDowns().length === 1, 200); // plain terminal: 50 ms
+  assert.equal(keyDowns()[0].key, 'Escape');
+  t.stdin.write(`${ESC}[?29u`); // keyboard flags reply
+  await sleep(20);
+  t.stdin.write(ESC);
+  await sleep(150);
+  assert.equal(keyDowns().length, 1, 'flushed too soon');
+  await until(() => keyDowns().length === 2, 500);
+  t.signals.emit('SIGTERM');
+  assert.equal(await p, 0);
+});
+
+test('a process exit before finish still restores the terminal; finish removes that listener', async () => {
+  {
+    const { t, p } = await startInteractive();
+    assert.equal(t.signals.listenerCount('exit'), 1);
+    t.signals.emit('exit', 1); // e.g. process.exit from elsewhere
+    assert.ok(t.out().endsWith(MODES_OFF + leaveScreen()));
+    assert.equal(t.stdin.isRaw, false);
+    assert.equal(t.signals.listenerCount('exit'), 0);
+    const len = t.out().length;
+    t.signals.emit('SIGTERM');
+    assert.equal(await p, 0);
+    assert.ok(!t.out().slice(len).includes(leaveScreen()), 'restored twice');
+    await fake.close();
+  }
+  const { t, p } = await startInteractive();
+  t.stdin.write('q');
+  assert.equal(await p, 0);
+  assert.equal(t.signals.listenerCount('exit'), 0);
 });
 
 async function untilAsync(cond, ms = 3000) {

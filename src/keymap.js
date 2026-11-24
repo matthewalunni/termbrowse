@@ -65,7 +65,8 @@ const SPEC_KEY = { Space: ' ' };
 export function matchesSpec(ev, spec) {
   if (!!ev.ctrl !== !!spec.ctrl || !!ev.alt !== !!spec.alt || ev.meta) return false;
   const want = SPEC_KEY[spec.key] ?? spec.key;
-  // Terminals report Ctrl+letter without case, so ctrl-A and ctrl-a are the same key.
-  if (spec.ctrl && /^[a-zA-Z]$/.test(want)) return ev.key.toLowerCase() === want.toLowerCase();
+  // Terminals report Ctrl+letter without case, so ctrl-A and ctrl-a are the same key. A plain
+  // lowercase letter also matches its capital (Caps Lock, Shift); a capital spec only itself.
+  if (/^[a-zA-Z]$/.test(want) && (spec.ctrl || want === want.toLowerCase())) return ev.key.toLowerCase() === want.toLowerCase();
   return ev.key === want;
 }

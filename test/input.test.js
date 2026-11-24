@@ -211,3 +211,11 @@ test('SGR extra buttons (128+) are dropped', () => {
   assert.deepEqual(parse(`${ESC}[<128;5;5M`), []);
   assert.deepEqual(parse(`${ESC}[<129;5;5m`), []);
 });
+
+test('focus reports: ESC[I is focus in, ESC[O focus out; ESC O alone is still SS3', () => {
+  assert.deepEqual(parse(`${ESC}[I`), [{ type: 'focus', in: true }]);
+  assert.deepEqual(parse(`${ESC}[O`), [{ type: 'focus', in: false }]);
+  const evs = parse(`${ESC}[I${ESC}[<0;10;5M`);
+  assert.deepEqual(evs.map((e) => e.type), ['focus', 'mouse']);
+  assert.equal(parse(`${ESC}OA`)[0].key, 'ArrowUp');
+});
