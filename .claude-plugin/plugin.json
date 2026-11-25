@@ -1,6 +1,6 @@
 {
   "name": "termbrowse",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "One Chrome for Testing per AI agent through the chrome-devtools MCP server, which you can watch live in a terminal pane via Kitty graphics.",
   "author": {
     "name": "Matthew Alunni"
