@@ -316,6 +316,9 @@ export async function launchChrome({
   const kill = async () => {
     if (child.pid === undefined || child.exitCode !== null || child.signalCode !== null) return;
     const start = Date.now();
+    // Hold the event loop open until Chrome exits: on Node 22 an unref'd child's exit can be lost
+    // once the SIGKILL timer has fired, leaving kill() pending as the process exits.
+    child.ref();
     signal('SIGTERM');
     const timer = setTimeout(() => signal('SIGKILL'), killGraceMs);
     await exited;
