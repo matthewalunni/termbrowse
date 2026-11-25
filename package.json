@@ -1,6 +1,6 @@
 {
   "name": "termbrowse",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Chrome in your terminal via Kitty graphics, plus one Chrome per AI agent",
   "type": "module",
   "license": "MIT",
