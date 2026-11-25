@@ -32,9 +32,8 @@ jobs:
       # Ubuntu 23.10+ blocks the unprivileged user namespaces Chrome's sandbox needs.
       - if: runner.os == 'Linux'
         run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
-      # --test-force-exit (in the script): a test that fails and leaves a Chrome or a socket open
-      # cannot keep the run alive. The TAP copy holds every failure's details as it happened, also
-      # when the job is cancelled before the spec reporter's summary.
+      # The spec reporter prints failure details only in its summary at the end; the TAP copy has
+      # them as they happen, and is uploaded even if the step fails or times out.
       - run: npm run test:ci
         timeout-minutes: 15
       - if: always()

@@ -17,6 +17,7 @@ import { paths } from '../src/paths.js';
 import { upsertEntry, removeEntry, readRegistry } from '../src/registry.js';
 import { startFakeCdp } from './helpers/fake-cdp.js';
 import { runViewer } from '../src/viewer.js';
+import './helpers/exit-guard.js';
 
 const BIN = fileURLToPath(new URL('../bin/termbrowse.js', import.meta.url));
 const skip = process.env.TERMBROWSE_SKIP_CHROME === '1' ? 'TERMBROWSE_SKIP_CHROME=1' : false;

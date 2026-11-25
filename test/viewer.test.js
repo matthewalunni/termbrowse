@@ -12,6 +12,7 @@ import { cellToPage, fit } from '../src/layout.js';
 import { paths } from '../src/paths.js';
 import { osc52 } from '../src/pageops.js';
 import { controlPath, readControl, setAgentBusy } from '../src/control.js';
+import './helpers/exit-guard.js';
 
 const ESC = '\x1b';
 

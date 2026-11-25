@@ -11,6 +11,7 @@ import { readRegistry, findEntry } from '../src/registry.js';
 import { listTargets } from '../src/cdp.js';
 import { takeControl, releaseControl, readControl, controlPath } from '../src/control.js';
 import { takeoverNote, appendNote } from '../src/mcp.js';
+import './helpers/exit-guard.js';
 
 const skip = process.env.TERMBROWSE_SKIP_CHROME === '1' ? 'TERMBROWSE_SKIP_CHROME=1' : false;
 const BIN = fileURLToPath(new URL('../bin/termbrowse.js', import.meta.url));

@@ -7,6 +7,7 @@ import { ensureChrome, freePort, launchChrome } from '../src/chrome.js';
 import { listTargets, browserVersion } from '../src/cdp.js';
 import { loadConfig } from '../src/config.js';
 import { paths } from '../src/paths.js';
+import './helpers/exit-guard.js';
 
 const skip = process.env.TERMBROWSE_SKIP_CHROME === '1' ? 'TERMBROWSE_SKIP_CHROME=1' : false;
 
