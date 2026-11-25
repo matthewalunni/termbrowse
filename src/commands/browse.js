@@ -31,6 +31,7 @@ export async function runBrowse(
     fill: fillOverride, // --fill (true) / --no-fill (false); undefined: from the config
     watch = false, // --watch: draw only, send no input (else [view] interactive decides)
     viewer = runViewer, // injectable for tests
+    exit = (code) => process.exit(code), // injectable for tests: a signal before any Chrome starts exits at once
   } = {},
 ) {
   // The viewer would refuse a terminal it can't draw in anyway; refuse before downloading or
@@ -52,7 +53,7 @@ export async function runBrowse(
   let launching = false;
   const onSignal = (sig) => {
     interrupted ??= sig;
-    if (!chrome && !launching) process.exit(130);
+    if (!chrome && !launching) exit(130);
   };
   const handlers = SIGNALS.map((sig) => [sig, () => onSignal(sig)]);
   for (const [sig, fn] of handlers) signals.on(sig, fn);
