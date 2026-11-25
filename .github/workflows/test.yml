@@ -32,4 +32,13 @@ jobs:
       # Ubuntu 23.10+ blocks the unprivileged user namespaces Chrome's sandbox needs.
       - if: runner.os == 'Linux'
         run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
-      - run: npm test
+      # The spec reporter prints failure details only in its summary at the end; the TAP copy has
+      # them as they happen, and is uploaded even if the step fails or times out.
+      - run: npm run test:ci
+        timeout-minutes: 15
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results-${{ matrix.os }}-node${{ matrix.node }}
+          path: test-results.tap
+          if-no-files-found: ignore

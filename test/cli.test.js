@@ -17,6 +17,7 @@ import { paths } from '../src/paths.js';
 import { upsertEntry, removeEntry, readRegistry } from '../src/registry.js';
 import { startFakeCdp } from './helpers/fake-cdp.js';
 import { runViewer } from '../src/viewer.js';
+import { exitGuard } from './helpers/exit-guard.js';
 
 const BIN = fileURLToPath(new URL('../bin/termbrowse.js', import.meta.url));
 const skip = process.env.TERMBROWSE_SKIP_CHROME === '1' ? 'TERMBROWSE_SKIP_CHROME=1' : false;
@@ -74,8 +75,29 @@ function fakeTerm({ replyDelayMs = 0, kitty = true } = {}) {
 const children = [];
 after(async () => {
   for (const c of children) if (c.exitCode === null) c.kill('SIGKILL');
+  // Any Chrome a run left behind (its process group), before its profile goes with tmp.
+  for (const e of await readRegistry(p).catch(() => [])) {
+    try { process.kill(-e.pid, 'SIGKILL'); } catch {}
+  }
   await rm(tmp, { recursive: true, force: true });
 });
+
+// Whether a promise settles within ms.
+const settles = (promise, ms) => Promise.race([promise.then(() => true, () => true), sleep(ms).then(() => false)]);
+
+// Ends a run (browse, login) that its test left running because an assertion failed before the
+// test signalled it. Left running, its viewer's CDP sockets and its Chrome keep this file's
+// process alive after the last test, and the whole suite hangs. So: the signal a user would send,
+// repeated in case the run had not attached its handlers yet, then its Chrome killed outright.
+async function endRun({ signals, result, signal = 'SIGTERM', chromePid }) {
+  for (let i = 0; i < 20; i++) {
+    if (await settles(result, i === 0 ? 0 : 1000)) return;
+    signals.emit(signal, signal);
+  }
+  if (await settles(result, 1000)) return;
+  const pid = await chromePid?.();
+  if (pid) try { process.kill(-pid, 'SIGKILL'); } catch {}
+}
 
 function run(args, extraEnv = {}) {
   return new Promise((resolve) => {
@@ -270,25 +292,30 @@ const FRAME = '\x1b_Ga=T';
 // viewer is in its startup). Tests that signal the run must do it from there or once a frame is
 // drawn: the registry entry is readable a moment before runBrowse checks for a signal, and a
 // signal in that moment ends the run with 130 by design (see runBrowse), not through the viewer.
-async function startBrowse(pid, termOptions, { onViewer } = {}) {
+// The run is ended when the test does (endRun), whether or not the test got as far as ending it.
+async function startBrowse(tc, pid, termOptions, { onViewer } = {}) {
   const t = fakeTerm(termOptions);
   const viewer = (o) => {
     const run = runViewer(o);
     onViewer?.(t);
     return run;
   };
-  const result = runBrowse('data:text/html,<body style="background:red">hi</body>', { ...t, pid, viewer });
-  const entry = await until(async () => (await readRegistry(p)).find((e) => e.agentId === `standalone-${pid}`), 30_000);
+  const agentId = `standalone-${pid}`;
+  // exit: a signal before Chrome starts would end this whole test process.
+  const result = runBrowse('data:text/html,<body style="background:red">hi</body>', { ...t, pid, viewer, exit: () => {} });
+  const findEntry = async () => (await readRegistry(p)).find((e) => e.agentId === agentId);
+  tc.after(() => endRun({ signals: t.signals, result, chromePid: async () => (await findEntry())?.pid }));
+  const entry = await until(findEntry, 30_000);
   return { t, result, entry };
 }
 
-test('browse: fresh starter copy per run, registered, drawn, closed and deleted on SIGTERM; two at once', { skip, timeout: 90_000 }, async () => {
+test('browse: fresh starter copy per run, registered, drawn, closed and deleted on SIGTERM; two at once', { skip, timeout: 90_000 }, async (tc) => {
   await mkdir(p.starter, { recursive: true });
   await writeFile(join(p.starter, 'from-starter'), 'x');
   await writeFile(join(p.starter, 'lockfile'), 'x'); // never copied (a real SingletonLock would stop login's Chrome below)
   // Each run is named by a pid; live stand-ins let two runs share this test process.
   const [pidA, pidB] = [fakeChrome().pid, fakeChrome().pid];
-  const [a, b] = await Promise.all([startBrowse(pidA), startBrowse(pidB)]);
+  const [a, b] = await Promise.all([startBrowse(tc, pidA), startBrowse(tc, pidB)]);
   for (const [run, pid] of [[a, pidA], [b, pidB]]) {
     assert.ok(run.entry, 'standalone entry registered');
     assert.equal(run.entry.kind, 'standalone');
@@ -316,11 +343,11 @@ test('browse: fresh starter copy per run, registered, drawn, closed and deleted 
   assert.deepEqual(await readRegistry(p), []);
 });
 
-test('browse: a signal while the viewer is still starting ends the run and cleans up', { skip, timeout: 60_000 }, async () => {
+test('browse: a signal while the viewer is still starting ends the run and cleans up', { skip, timeout: 60_000 }, async (tc) => {
   const pid = fakeChrome().pid;
   // The Kitty reply comes late, so the viewer is still in its startup when the signal lands.
   let listening; // SIGTERM listeners when the signal landed: runBrowse's only, the viewer's not yet
-  const { t, result, entry } = await startBrowse(pid, { replyDelayMs: 600 }, {
+  const { t, result, entry } = await startBrowse(tc, pid, { replyDelayMs: 600 }, {
     onViewer: (term) => {
       listening = term.signals.listenerCount('SIGTERM');
       term.signals.emit('SIGTERM');
@@ -328,7 +355,6 @@ test('browse: a signal while the viewer is still starting ends the run and clean
   });
   assert.ok(entry, 'standalone entry registered');
   const code = await Promise.race([result, sleep(10_000).then(() => 'hung')]);
-  if (code === 'hung') t.signals.emit('SIGTERM'); // let the run end so the test can clean up
   assert.notEqual(code, 'hung', 'the signal during viewer startup was swallowed');
   assert.equal(listening, 1, 'the signal landed before the viewer attached its handlers');
   assert.equal(code, 0);
@@ -338,9 +364,9 @@ test('browse: a signal while the viewer is still starting ends the run and clean
   assert.equal(t.signals.listenerCount('SIGTERM'), 0);
 });
 
-test('browse: stdout errors after the terminal hangs up do not stop the cleanup', { skip, timeout: 60_000 }, async () => {
+test('browse: stdout errors after the terminal hangs up do not stop the cleanup', { skip, timeout: 60_000 }, async (tc) => {
   const pid = fakeChrome().pid;
-  const { t, result, entry } = await startBrowse(pid);
+  const { t, result, entry } = await startBrowse(tc, pid);
   assert.ok(entry, 'standalone entry registered');
   assert.ok(await until(() => t.out().includes(FRAME), 15_000), 'a Kitty frame was drawn');
   const eio = () => Object.assign(new Error('write EIO'), { code: 'EIO' });
@@ -358,7 +384,7 @@ test('browse: stdout errors after the terminal hangs up do not stop the cleanup'
 });
 
 // Login with a headless Chrome (tests must not open windows) and a short save delay.
-async function startLogin(saveDelayMs) {
+async function startLogin(tc, saveDelayMs) {
   const port = await freePort();
   const stdin = new PassThrough();
   const stdout = new PassThrough();
@@ -371,11 +397,12 @@ async function startLogin(saveDelayMs) {
   // login refuses outright on Linux without a display; the test Chrome is headless, so any value does.
   const loginEnv = process.platform === 'linux' && !env.DISPLAY && !env.WAYLAND_DISPLAY ? { ...env, DISPLAY: ':0' } : env;
   const result = runLogin([], { stdin, stdout, stderr, env: loginEnv, signals, saveDelayMs, chromeOptions: { headless: true, port } });
+  tc.after(() => endRun({ signals, result }));
   return { port, stdin, signals, result, out: () => out, err: () => err };
 }
 
-test('login: Enter, then Saving…, Chrome kept for the delay, then closed', { skip, timeout: 60_000 }, async () => {
-  const l = await startLogin(1500);
+test('login: Enter, then Saving…, Chrome kept for the delay, then closed', { skip, timeout: 60_000 }, async (tc) => {
+  const l = await startLogin(tc, 1500);
   assert.ok(await until(() => l.out().includes('Sign in to the sites your agents need, then press Enter here (or close the browser window).\n'), 30_000));
   const { port } = l;
   l.stdin.write('\n');
@@ -386,8 +413,8 @@ test('login: Enter, then Saving…, Chrome kept for the delay, then closed', { s
   assert.equal(l.err(), '');
 });
 
-test('login: closing the last page finishes too', { skip, timeout: 60_000 }, async () => {
-  const l = await startLogin(0);
+test('login: closing the last page finishes too', { skip, timeout: 60_000 }, async (tc) => {
+  const l = await startLogin(tc, 0);
   assert.ok(await until(() => l.out().includes('press Enter'), 30_000));
   const { port } = l;
   // As a person would: the window has been up a moment, so login has seen its page (it treats
@@ -402,8 +429,8 @@ test('login: closing the last page finishes too', { skip, timeout: 60_000 }, asy
   assert.equal(await browserVersion(port), null);
 });
 
-test('login: Ctrl-C while saving asks once more; a second quits at once with a warning', { skip, timeout: 60_000 }, async () => {
-  const l = await startLogin(60_000);
+test('login: Ctrl-C while saving asks once more; a second quits at once with a warning', { skip, timeout: 60_000 }, async (tc) => {
+  const l = await startLogin(tc, 60_000);
   assert.ok(await until(() => l.out().includes('press Enter'), 30_000));
   const { port } = l;
   l.stdin.write('\n');
@@ -585,3 +612,5 @@ test('browse passes null as the control agent id (standalone browsers never writ
   assert.equal(opts.control.agentId, null);
   assert.equal(opts.control.idleReturnMs, 300_000);
 });
+
+exitGuard();
