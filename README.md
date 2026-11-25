@@ -43,6 +43,8 @@ termbrowse example.com
 termbrowse localhost:3000        # localhost and 127.0.0.1 get http://
 ```
 
+![termbrowse showing Hacker News in a terminal pane: scrolling, link hints, opening a story, going back and searching the page](https://raw.githubusercontent.com/matthewalunni/termbrowse/main/docs/viewer.gif)
+
 This starts a Chrome for Testing of its own and draws the page in the terminal. In a terminal that can't draw Kitty graphics it says so and exits 2 before starting any Chrome. The viewer has vim-style keys (see [Using the page](#using-the-page)): type `:q` and Enter to quit, or press Ctrl-C (except in Insert mode, where Ctrl-C goes to the page). Quitting closes that Chrome. The last row is a status line with the mode, the URL and the main keys, e.g. `NORMAL · <url> · f links · i insert · :q quit · ? help`, or `paused` (the pane is too small) or `disconnected` (Chrome went away). When a new tab opens (a popup, or a page an agent opens with `new_page`), the viewer switches to it, and when that tab closes it goes back to the tab it was showing before.
 
 Each run uses a fresh copy of the starter profile (see `termbrowse login`), and that copy is deleted when you quit. Signing in during a `termbrowse <url>` session lasts only for that session. You can run several at once.
