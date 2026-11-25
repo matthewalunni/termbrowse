@@ -4,8 +4,8 @@
 class Termbrowse < Formula
   desc "Chrome in your terminal via Kitty graphics, plus one Chrome per AI agent"
   homepage "https://github.com/matthewalunni/termbrowse"
-  url "https://registry.npmjs.org/termbrowse/-/termbrowse-0.1.0.tgz"
-  sha256 "ae4e2eeb4b21118aecfe1b5319dd447c55f1726605ddd2c5c2f2de6b62729db5"
+  url "https://registry.npmjs.org/termbrowse/-/termbrowse-0.1.1.tgz"
+  sha256 "24f55376aa5d385c24ad5227b617be849bddc3805d20505b671a1a4332358c27"
   license "MIT"
 
   depends_on "node"
