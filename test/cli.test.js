@@ -17,7 +17,7 @@ import { paths } from '../src/paths.js';
 import { upsertEntry, removeEntry, readRegistry } from '../src/registry.js';
 import { startFakeCdp } from './helpers/fake-cdp.js';
 import { runViewer } from '../src/viewer.js';
-import './helpers/exit-guard.js';
+import { exitGuard } from './helpers/exit-guard.js';
 
 const BIN = fileURLToPath(new URL('../bin/termbrowse.js', import.meta.url));
 const skip = process.env.TERMBROWSE_SKIP_CHROME === '1' ? 'TERMBROWSE_SKIP_CHROME=1' : false;
@@ -612,3 +612,5 @@ test('browse passes null as the control agent id (standalone browsers never writ
   assert.equal(opts.control.agentId, null);
   assert.equal(opts.control.idleReturnMs, 300_000);
 });
+
+exitGuard();

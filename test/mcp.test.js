@@ -11,7 +11,7 @@ import { readRegistry, findEntry } from '../src/registry.js';
 import { listTargets } from '../src/cdp.js';
 import { takeControl, releaseControl, readControl, controlPath } from '../src/control.js';
 import { takeoverNote, appendNote } from '../src/mcp.js';
-import './helpers/exit-guard.js';
+import { exitGuard } from './helpers/exit-guard.js';
 
 const skip = process.env.TERMBROWSE_SKIP_CHROME === '1' ? 'TERMBROWSE_SKIP_CHROME=1' : false;
 const BIN = fileURLToPath(new URL('../bin/termbrowse.js', import.meta.url));
@@ -670,3 +670,5 @@ test('two takeovers between agent calls: a tab change in the first is still repo
     assert.ok(n[0].endsWith(' The user changed tabs; call list_pages and select_page before continuing.'), n[0]);
   });
 });
+
+exitGuard();

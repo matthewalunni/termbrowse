@@ -134,7 +134,10 @@ export async function runLogin(
     // Chrome can take many seconds over: chrome.kill() below ends it within its kill grace.
     if (code === 0) {
       await closeBrowser(chrome.port);
-      await Promise.race([exited, sleep(CLOSE_GRACE_MS)]);
+      // Cleared once Chrome has exited: a pending grace timer would hold the process open for the rest of it.
+      let grace;
+      await Promise.race([exited, new Promise((r) => { grace = setTimeout(r, CLOSE_GRACE_MS); })]);
+      clearTimeout(grace);
     }
   } finally {
     polling = false;

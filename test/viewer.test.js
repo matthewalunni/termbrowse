@@ -12,7 +12,7 @@ import { cellToPage, fit } from '../src/layout.js';
 import { paths } from '../src/paths.js';
 import { osc52 } from '../src/pageops.js';
 import { controlPath, readControl, setAgentBusy } from '../src/control.js';
-import './helpers/exit-guard.js';
+import { exitGuard } from './helpers/exit-guard.js';
 
 const ESC = '\x1b';
 
@@ -1787,3 +1787,5 @@ test('watch only on an agent browser at about:blank: the status row says blank p
   t.stdin.write('q');
   assert.equal(await p, 0);
 });
+
+exitGuard();

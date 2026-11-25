@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { startFakeCdp } from './helpers/fake-cdp.js';
 import { CdpSession, listTargets, browserVersion } from '../src/cdp.js';
 import * as ops from '../src/pageops.js';
-import './helpers/exit-guard.js';
+import { exitGuard } from './helpers/exit-guard.js';
 
 const skip = process.env.TERMBROWSE_SKIP_CHROME === '1' ? 'TERMBROWSE_SKIP_CHROME=1' : false;
 
@@ -314,3 +314,5 @@ test('real Chrome: hints, focus, find and tabs', { skip, timeout: 120_000 }, asy
     browser.close();
   }
 });
+
+exitGuard();
