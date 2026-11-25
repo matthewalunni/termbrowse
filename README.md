@@ -2,7 +2,7 @@
 
 termbrowse draws a live Chrome tab inside your terminal with the Kitty graphics protocol. It also gives each AI coding agent its own Chrome for Testing through an MCP server, so you can watch any agent's browser in a pane next to it. It never touches your everyday Google Chrome or its profile. It downloads and uses Chrome for Testing, keeps one profile per agent, and lets you sign in once with `termbrowse login` so new agent profiles start signed in.
 
-<!-- TODO: add a recording of the viewer in a pane (docs/demo.gif) and show it here. -->
+![termbrowse showing Hacker News in a terminal pane: scrolling, link hints, opening a story, going back and searching the page](docs/demo.gif)
 
 The viewer is interactive: click, scroll, type and paste into the page from the terminal (see [Using the page](#using-the-page)). On an agent's browser, the first thing you do takes control from the agent until you hand it back.
 
